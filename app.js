@@ -9,7 +9,15 @@ let state = {
   isOwner: false,
   storeName: "Shop Clock",
   logo: "",
-  premiumUnlocked: false
+  premiumUnlocked: false,
+  premiumFlags: {
+    schedule:false,
+    payroll:false,
+    weekLock:false,
+    dashboard:false,
+    weeklyExport:false,
+    audit:false
+  }
 };
 
 let db;
@@ -29,13 +37,14 @@ function qs(sel){ return document.querySelector(sel); }
 
 function initDB(){
   return new Promise((res)=>{
-    const request = indexedDB.open("clockDB", 3);
+    const request = indexedDB.open("clockDB", 4);
     request.onupgradeneeded = (e)=>{
       db = e.target.result;
       if(!db.objectStoreNames.contains("employees")) db.createObjectStore("employees", { keyPath:"id" });
       if(!db.objectStoreNames.contains("shifts")) db.createObjectStore("shifts", { keyPath:"shiftId" });
       if(!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath:"key" });
       if(!db.objectStoreNames.contains("schedule")) db.createObjectStore("schedule", { keyPath:"id" });
+      if(!db.objectStoreNames.contains("audit")) db.createObjectStore("audit", { keyPath:"id" });
     };
     request.onsuccess = (e)=>{ db = e.target.result; res(); };
   });
@@ -124,6 +133,17 @@ function weekLabel(weekKey){
   return `${mm1}/${dd1} - ${mm2}/${dd2}`;
 }
 
+function isPastWeek(weekKey){
+  const cur = weekKeyFromDate(new Date());
+  return String(weekKey) < String(cur);
+}
+
+function canEditWeek(weekKey){
+  if(!hasPremium("weekLock")) return true;
+  if(!isPastWeek(weekKey)) return true;
+  return !!state.isOwner;
+}
+
 function clearLogoutTimer(){
   if(logoutTimer){ clearTimeout(logoutTimer); logoutTimer = null; }
 }
@@ -147,9 +167,27 @@ async function loadSettings(){
   const storeName = await get("settings","storeName");
   const logo = await get("settings","logo");
   const premium = await get("settings","premiumUnlocked");
+  const flags = await get("settings","premiumFlags");
   if(storeName && typeof storeName.value === "string") state.storeName = storeName.value;
   if(logo && typeof logo.value === "string") state.logo = logo.value;
-  state.premiumUnlocked = !!(premium && premium.value === true);
+
+  const legacy = !!(premium && premium.value === true);
+  const f = (flags && typeof flags.value === "object" && flags.value) ? flags.value : null;
+
+  state.premiumUnlocked = legacy || !!f;
+
+  const base = { schedule:false, payroll:false, weekLock:false, dashboard:false, weeklyExport:false, audit:false };
+
+  if(legacy){
+    base.schedule = true;
+  }
+  if(f){
+    for(const k of Object.keys(base)){
+      if(typeof f[k] === "boolean") base[k] = f[k];
+    }
+  }
+
+  state.premiumFlags = base;
 }
 
 async function saveSetting(key, value){
@@ -212,14 +250,14 @@ function navBarHTML(active){
   `;
 }
 
-function renderPremiumLocked(){
+function renderPremiumLocked(featureLabel){
   const who = state.isAdmin ? (state.isOwner ? "Admin (Owner)" : "Admin") : `Welcome ${escapeHTML(state.currentUser?.name || "")}!`;
   setAppHTML(`
     ${brandHTML(who)}
     <div class="card">
       <div style="font-weight:800; font-size:16px;">Premium Feature</div>
       <div class="note" style="margin-top:8px;">
-        Scheduling is part of the Premium package.
+        ${escapeHTML(featureLabel || "This feature")} is part of the Premium package.
       </div>
       <div class="note" style="margin-top:8px;">
         If you’d like this enabled, contact the developer.
@@ -231,10 +269,14 @@ function renderPremiumLocked(){
   `);
 }
 
+function hasPremium(featureKey){
+  return !!(state.premiumFlags && state.premiumFlags[featureKey] === true);
+}
+
 function openSchedule(){
   pingActivity();
-  if(!state.premiumUnlocked){
-    renderPremiumLocked();
+  if(!hasPremium("schedule")){
+    renderPremiumLocked("Scheduling");
     return;
   }
   if(state.isAdmin){
@@ -244,25 +286,28 @@ function openSchedule(){
   }
 }
 
-async function setPremiumUnlocked(value){
-  await save("settings", { key:"premiumUnlocked", value: !!value });
-  state.premiumUnlocked = !!value;
+async function setPremiumFlags(flagsObj){
+  const cur = (state.premiumFlags && typeof state.premiumFlags === "object") ? state.premiumFlags : {};
+  const next = { ...cur };
+  for(const k of ["schedule","payroll","weekLock","dashboard","weeklyExport","audit"]){
+    if(typeof flagsObj[k] === "boolean") next[k] = flagsObj[k];
+  }
+  await save("settings", { key:"premiumFlags", value: next });
+  state.premiumFlags = next;
+  state.premiumUnlocked = Object.values(next).some(v=>v===true);
 }
 
 function setupDevLongPress(btn){
   let timer = null;
-
   const start = ()=>{
     timer = setTimeout(()=>{
       timer = null;
       openDevUnlockModal();
     }, 5000);
   };
-
   const cancel = ()=>{
     if(timer){ clearTimeout(timer); timer = null; }
   };
-
   btn.addEventListener("pointerdown", start);
   btn.addEventListener("pointerup", cancel);
   btn.addEventListener("pointercancel", cancel);
@@ -271,80 +316,70 @@ function setupDevLongPress(btn){
 
 function openDevUnlockModal(){
   pingActivity();
-  openModal("Developer Unlock", `
-    <div class="note">Enter developer code to toggle Premium scheduling.</div>
+  openModal("Developer Panel", `
+    <div class="note">Enter developer code to manage Premium features.</div>
     <div style="margin-top:10px;">
       <input class="field" id="devUnlockCode" placeholder="Developer code" inputmode="numeric">
     </div>
     <div class="row" style="justify-content:flex-end;margin-top:12px;">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn accent" onclick="applyDevUnlock()">Unlock</button>
-      <button class="btn danger" onclick="applyDevLock()">Lock</button>
+      <button class="btn accent" onclick="openDevPanel()">Continue</button>
     </div>
   `);
 }
 
-async function applyDevUnlock(){
+async function openDevPanel(){
   pingActivity();
   const code = (qs("#devUnlockCode")?.value || "").trim();
   if(code !== DEV_UNLOCK_CODE) return;
-  await setPremiumUnlocked(true);
-  closeModal();
-  // If user was viewing locked screen, take them into schedule (admin/employee)
-  openSchedule();
+
+  const f = state.premiumFlags || {};
+  openModal("Premium Controls", `
+    <div class="note">Toggle features and save.</div>
+
+    <div style="margin-top:12px; display:flex; flex-direction:column; gap:10px;">
+      ${devToggleRow("schedule","Schedule Builder", f.schedule)}
+      ${devToggleRow("payroll","Payroll Summary", f.payroll)}
+      ${devToggleRow("weekLock","Lock Past Weeks", f.weekLock)}
+      ${devToggleRow("dashboard","Weekly Dashboard", f.dashboard)}
+      ${devToggleRow("weeklyExport","Weekly Export Summary", f.weeklyExport)}
+      ${devToggleRow("audit","Audit Log Viewer", f.audit)}
+    </div>
+
+    <div class="row" style="justify-content:flex-end;margin-top:14px;">
+      <button class="btn danger" onclick="devDisableAll()">Disable All</button>
+      <button class="btn accent" onclick="devSaveFlags()">Save</button>
+    </div>
+  `);
 }
 
-async function applyDevLock(){
+function devToggleRow(key, label, checked){
+  return `
+    <label style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px; border:1px solid var(--line); border-radius:14px; background: rgba(0,0,0,.14);">
+      <div style="font-weight:700;">${escapeHTML(label)}</div>
+      <input type="checkbox" id="flag_${escapeHTML(key)}" ${checked ? "checked" : ""} style="width:22px;height:22px;">
+    </label>
+  `;
+}
+
+async function devDisableAll(){
   pingActivity();
-  const code = (qs("#devUnlockCode")?.value || "").trim();
-  if(code !== DEV_UNLOCK_CODE) return;
-  await setPremiumUnlocked(false);
+  await setPremiumFlags({ schedule:false, payroll:false, weekLock:false, dashboard:false, weeklyExport:false, audit:false });
   closeModal();
-  if(state.isAdmin) renderAdmin(); else renderEmployee();
 }
 
-/* ---------- Webhook human formatting ---------- */
-
-function fmtDateLocal(iso){
-  if(!iso) return "--";
-  const d = new Date(iso);
-  const mm = String(d.getMonth()+1).padStart(2,"0");
-  const dd = String(d.getDate()).padStart(2,"0");
-  const yyyy = d.getFullYear();
-  return `${mm}/${dd}/${yyyy}`;
-}
-
-function fmtTimeLocal12(iso){
-  if(!iso) return "--";
-  const d = new Date(iso);
-  let h = d.getHours();
-  const m = String(d.getMinutes()).padStart(2,"0");
-  const ampm = h >= 12 ? "PM" : "AM";
-  h = h % 12;
-  if(h === 0) h = 12;
-  return `${h}:${m} ${ampm}`;
-}
-
-function plural(n, word){
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
-}
-
-function fmtHoursDeltaWords(deltaHours){
-  const v = Number(deltaHours || 0);
-  const sign = v > 0 ? "+" : v < 0 ? "-" : "";
-  const absMinutes = Math.round(Math.abs(v) * 60);
-  const hrs = Math.floor(absMinutes / 60);
-  const mins = absMinutes % 60;
-  if(absMinutes === 0) return "0 minutes";
-  if(hrs > 0 && mins > 0) return `${sign}${plural(hrs, "hour")} ${plural(mins, "minute")}`;
-  if(hrs > 0) return `${sign}${plural(hrs, "hour")}`;
-  return `${sign}${plural(mins, "minute")}`;
-}
-
-async function employeeLabel(employeeId){
-  const emp = await get("employees", employeeId);
-  if(!emp) return { name: "Unknown", id: String(employeeId || "") };
-  return { name: String(emp.name || "Unknown"), id: String(emp.id || employeeId || "") };
+async function devSaveFlags(){
+  pingActivity();
+  const flags = {
+    schedule: !!qs("#flag_schedule")?.checked,
+    payroll: !!qs("#flag_payroll")?.checked,
+    weekLock: !!qs("#flag_weekLock")?.checked,
+    dashboard: !!qs("#flag_dashboard")?.checked,
+    weeklyExport: !!qs("#flag_weeklyExport")?.checked,
+    audit: !!qs("#flag_audit")?.checked
+  };
+  await setPremiumFlags(flags);
+  closeModal();
 }
 
 async function sendWebhook(payload){
@@ -357,6 +392,23 @@ async function sendWebhook(payload){
     });
   }catch(e){}
 }
+async function addAudit(entry){
+  const rec = {
+    id: Date.now().toString() + "_" + Math.random().toString(16).slice(2),
+    at: new Date().toISOString(),
+    ...entry
+  };
+  await save("audit", rec);
+}
+
+async function getAuditByWeek(weekKey){
+  const all = await getAll("audit");
+  return all
+    .filter(x => x && x.weekKey === weekKey)
+    .sort((a,b)=> new Date(b.at).getTime() - new Date(a.at).getTime());
+}
+
+
 
 /* ---------- Persistence hardening ---------- */
 
@@ -824,6 +876,15 @@ async function saveShiftEdit(shiftId, beforeIn, beforeOut){
   const empInfo = await employeeLabel(shift.employeeId);
   const dateStr = fmtDateLocal(shift.in);
 
+  await addAudit({
+    weekKey: weekKeyFromDate(new Date(shift.in)),
+    type: "Shift Edited",
+    actor: state.isOwner ? "Owner" : "Admin",
+    employeeId: shift.employeeId,
+    employeeName: empInfo.name,
+    details: `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nBefore\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}\nAfter\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\nHours Difference\n> ${fmtHoursDeltaWords(diffHours)}`
+  });
+
   await sendWebhook({
     content: `Shift Edited`,
     embeds: [{
@@ -862,6 +923,15 @@ async function confirmDeleteShift(shiftId){
 
   const empInfo = await employeeLabel(shift.employeeId);
   const dateStr = fmtDateLocal(shift.in);
+
+  await addAudit({
+    weekKey: weekKeyFromDate(new Date(shift.in)),
+    type: "Shift Edited",
+    actor: state.isOwner ? "Owner" : "Admin",
+    employeeId: shift.employeeId,
+    employeeName: empInfo.name,
+    details: `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nBefore\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}\nAfter\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\nHours Difference\n> ${fmtHoursDeltaWords(diffHours)}`
+  });
   const dur = shift.out ? hoursBetween(shift.in, shift.out) : 0;
 
   await sendWebhook({
@@ -913,7 +983,8 @@ async function exportJSON(){
   const employees = await getAll("employees");
   const settings = await getAll("settings");
   const schedule = await getAll("schedule");
-  const data = { employees, shifts, settings, schedule };
+  const audit = await getAll("audit");
+  const data = { employees, shifts, settings, schedule, audit };
 
   const blob = new Blob([JSON.stringify(data)], { type:"application/json" });
   const a = document.createElement("a");
@@ -939,6 +1010,7 @@ function importJSON(e){
     if(Array.isArray(data.shifts)) for(const shift of data.shifts) await save("shifts", shift);
     if(Array.isArray(data.settings)) for(const s of data.settings) await save("settings", s);
     if(Array.isArray(data.schedule)) for(const x of data.schedule) await save("schedule", x);
+    if(Array.isArray(data.audit)) for(const x of data.audit) await save("audit", x);
     await loadSettings();
     renderAdmin();
   };
@@ -1033,6 +1105,14 @@ async function setScheduleDay(weekKey, dayIndex, employeeId, hours, period){
   if(!empId){
     // Off: delete record
     await del("schedule", schedKey(weekKey, dayIndex));
+    await addAudit({
+      weekKey,
+      type: "Schedule Cleared",
+      actor: state.isOwner ? "Owner" : "Admin",
+      employeeId: "",
+      employeeName: "",
+      details: `${DAYS[dayIndex]}\n> Off`
+    });
     return;
   }
 
@@ -1049,6 +1129,16 @@ async function setScheduleDay(weekKey, dayIndex, employeeId, hours, period){
     updatedAt: new Date().toISOString()
   };
   await save("schedule", rec);
+
+  const emp = await get("employees", empId);
+  await addAudit({
+    weekKey,
+    type: "Schedule Updated",
+    actor: state.isOwner ? "Owner" : "Admin",
+    employeeId: empId,
+    employeeName: emp ? emp.name : empId,
+    details: `${DAYS[dayIndex]}\n> ${emp ? emp.name : empId} (${empId})\nShift\n> ${hhmmTo12(rec.start)} – ${hhmmTo12(rec.end)} (${rec.hours} hrs ${rec.period})`
+  });
 }
 
 async function clearScheduleWeek(weekKey){
@@ -1094,6 +1184,8 @@ async function scheduleClearWeek(){
 async function scheduleDayChanged(dayIndex){
   pingActivity();
   const weekKey = schedState.weekKey;
+  if(!canEditWeek(weekKey)) return;
+  const locked = !canEditWeek(weekKey);
   const emp = qs(`#sched_emp_${dayIndex}`)?.value || "";
   const hrs = qs(`#sched_hrs_${dayIndex}`)?.value || "8";
   const per = qs(`#sched_per_${dayIndex}`)?.value || "AM";
@@ -1108,6 +1200,7 @@ async function renderScheduleAdminBuilder(){
 
   if(!schedState.weekKey) schedState.weekKey = weekKeyFromDate(new Date());
   const weekKey = schedState.weekKey;
+  const locked = !canEditWeek(weekKey);
 
   const employees = (await getAll("employees"))
     .filter(e => e.active !== false)
@@ -1131,12 +1224,12 @@ async function renderScheduleAdminBuilder(){
 
       <div class="row" style="justify-content:center;margin-top:10px;">
         <button class="btn slim" onclick="scheduleThisWeek()">This Week</button>
-        <button class="btn slim" onclick="scheduleCopyLastWeek()">Copy Last Week</button>
-        <button class="btn slim danger" onclick="scheduleClearWeek()">Clear Week</button>
+        <button class="btn slim" onclick="scheduleCopyLastWeek()" ${locked ? "disabled style=\"opacity:.5;pointer-events:none;\"" : ""}>Copy Last Week</button>
+        <button class="btn slim danger" onclick="scheduleClearWeek()" ${locked ? "disabled style=\"opacity:.5;pointer-events:none;\"" : ""}>Clear Week</button>
       </div>
 
       <div class="note" style="margin-top:10px;">
-        Pick an employee, hours, and AM/PM. It auto-builds a shift inside shop hours (10:00 AM – 11:00 PM).
+        Pick an employee, hours, and AM/PM. It auto-builds a shift inside shop hours (10:00 AM – 11:00 PM).${locked ? `<br><br><span class="badge glow">Locked</span> <span class="note">Past weeks can only be edited by Owner.</span>` : ""}
       </div>
     </div>
 
@@ -1167,7 +1260,7 @@ async function renderScheduleAdminBuilder(){
       <div class="grid2" style="margin-top:12px;">
         <div>
           <div class="note">Employee</div>
-          <select class="field" id="sched_emp_${dayIndex}" onchange="scheduleDayChanged(${dayIndex})">
+          <select class="field" id="sched_emp_${dayIndex}" onchange="scheduleDayChanged(${dayIndex})" ${locked ? "disabled" : ""}>
             <option value="">Off</option>
             ${employees.map(e=>`<option value="${escapeHTML(e.id)}" ${e.id===employeeId?"selected":""}>${escapeHTML(e.name)} (${escapeHTML(e.id)})</option>`).join("")}
           </select>
@@ -1263,6 +1356,12 @@ async function renderAdmin(){
       <button class="btn" onclick="triggerImport()">Import</button>
       <input id="importFile" type="file" style="display:none" onchange="importJSON(event)">
     </div>
+<div class="row" style="margin-top:10px;">
+  <button class="btn" onclick="openDashboard()">Dashboard</button>
+  <button class="btn" onclick="openPayroll()">Payroll</button>
+  <button class="btn" onclick="openWeeklyExport()">Weekly Export</button>
+  <button class="btn" onclick="openAudit()">Audit</button>
+</div>
 
     <div class="hr"></div>
     <div class="list" id="empList"></div>
@@ -1348,6 +1447,7 @@ async function renderAdmin(){
       const inT = s.in ? formatTime(new Date(s.in)) : "--";
       const outT = s.out ? formatTime(new Date(s.out)) : "--";
       const dur = s.out ? hoursBetween(s.in, s.out) : 0;
+      const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
 
       const row = document.createElement("div");
       row.className = "shiftRow";
@@ -1359,15 +1459,298 @@ async function renderAdmin(){
         </div>
         <div class="right">
           ${s.out ? `<div><strong>${dur.toFixed(2)}</strong> hrs</div>` : `<div><strong>Open</strong></div>`}
+          ${lockedShift ? `<span class="badge glow">Locked</span>` : `
           <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
             <button class="btn slim" onclick="editShift('${escapeHTML(s.shiftId)}')">Edit</button>
             <button class="btn slim danger" onclick="deleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
-          </div>
+          </div>`}
         </div>
       `;
       recentList.appendChild(row);
     }
   }
+}
+
+function premiumOrLocked(key, label, renderFn){
+  pingActivity();
+  if(!hasPremium(key)){
+    renderPremiumLocked(label);
+    return;
+  }
+  renderFn();
+}
+
+function openDashboard(){ premiumOrLocked("dashboard","Weekly Dashboard", renderDashboard); }
+function openPayroll(){ premiumOrLocked("payroll","Payroll Summary", renderPayroll); }
+function openWeeklyExport(){ premiumOrLocked("weeklyExport","Weekly Export Summary", renderWeeklyExport); }
+function openAudit(){ premiumOrLocked("audit","Audit Log Viewer", renderAudit); }
+
+function barHTML(pct){
+  const p = Math.max(0, Math.min(100, pct));
+  return `<div style="height:10px; border-radius:999px; background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.10); overflow:hidden;">
+    <div style="height:100%; width:${p}%; background: linear-gradient(90deg, rgba(124,92,255,.55), rgba(46,204,113,.45)); box-shadow: 0 0 18px var(--glow);"></div>
+  </div>`;
+}
+
+async function computeWeekStats(weekKey){
+  const employees = (await getAll("employees")).filter(e=>e.active!==false);
+  const shifts = await getAll("shifts");
+  const rows = [];
+
+  for(const e of employees){
+    const wkShifts = shifts.filter(s => s.employeeId === e.id && s.out && weekKeyFromDate(new Date(s.in)) === weekKey);
+    let hours = 0;
+    for(const s of wkShifts) hours += hoursBetween(s.in, s.out);
+    const rate = Number(e.rate || 0);
+    const pay = hours * rate;
+    rows.push({ id:e.id, name:e.name, rate, shifts:wkShifts.length, hours, pay });
+  }
+
+  rows.sort((a,b)=> b.hours - a.hours);
+  const totalHours = rows.reduce((n,r)=> n + r.hours, 0);
+  const totalPay = rows.reduce((n,r)=> n + r.pay, 0);
+  return { rows, totalHours, totalPay };
+}
+
+async function renderDashboard(){
+  pingActivity();
+  await loadSettings();
+
+  const weekKey = weekKeyFromDate(new Date());
+  const stats = await computeWeekStats(weekKey);
+  const maxHours = Math.max(1, ...stats.rows.map(r=>r.hours));
+
+  setAppHTML(`
+    ${brandHTML(state.isOwner ? "Admin (Owner) — Dashboard" : "Admin — Dashboard")}
+    ${navBarHTML("clock")}
+    <div class="card">
+      <div style="font-weight:800;">This Week</div>
+      <div class="note">${weekLabel(weekKey)}</div>
+      <div class="kpi" style="justify-content:flex-start;margin-top:10px;">
+        <div class="pill"><strong>Total Hours</strong>&nbsp;&nbsp;${stats.totalHours.toFixed(2)}</div>
+        <div class="pill"><strong>Labor Cost</strong>&nbsp;&nbsp;$${stats.totalPay.toFixed(2)}</div>
+      </div>
+    </div>
+
+    <div class="list">
+      ${stats.rows.map(r=>{
+        const pct = (r.hours / maxHours) * 100;
+        return `
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+              <div>
+                <div style="font-weight:800;">${escapeHTML(r.name)} <span class="badge">${escapeHTML(r.id)}</span></div>
+                <div class="note">${r.shifts} shift(s) • $${r.rate.toFixed(2)}/hr</div>
+              </div>
+              <div style="text-align:right;">
+                <div style="font-weight:800;">${r.hours.toFixed(2)} hrs</div>
+                <div class="note">$${r.pay.toFixed(2)}</div>
+              </div>
+            </div>
+            <div style="margin-top:10px;">${barHTML(pct)}</div>
+          </div>
+        `;
+      }).join("") || `<div class="card soft"><div class="note">No data yet.</div></div>`}
+    </div>
+  `);
+}
+
+let payrollWeekKey = null;
+function payrollPrevWeek(){ payrollWeekKey = addDaysToWeekKey(payrollWeekKey, -7); renderPayroll(); }
+function payrollNextWeek(){ payrollWeekKey = addDaysToWeekKey(payrollWeekKey,  7); renderPayroll(); }
+function payrollThisWeek(){ payrollWeekKey = weekKeyFromDate(new Date()); renderPayroll(); }
+
+async function renderPayroll(){
+  pingActivity();
+  await loadSettings();
+
+  if(!payrollWeekKey) payrollWeekKey = weekKeyFromDate(new Date());
+  const weekKey = payrollWeekKey;
+
+  const stats = await computeWeekStats(weekKey);
+
+  setAppHTML(`
+    ${brandHTML(state.isOwner ? "Admin (Owner) — Payroll" : "Admin — Payroll")}
+    ${navBarHTML("clock")}
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <button class="btn slim" onclick="payrollPrevWeek()">◀ Prev</button>
+        <div style="text-align:center;">
+          <div style="font-weight:800;">Payroll Week</div>
+          <div class="note">${weekLabel(weekKey)}</div>
+        </div>
+        <button class="btn slim" onclick="payrollNextWeek()">Next ▶</button>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:10px;">
+        <button class="btn slim" onclick="payrollThisWeek()">This Week</button>
+      </div>
+      <div class="kpi" style="justify-content:flex-start;margin-top:10px;">
+        <div class="pill"><strong>Total Hours</strong>&nbsp;&nbsp;${stats.totalHours.toFixed(2)}</div>
+        <div class="pill"><strong>Total Pay</strong>&nbsp;&nbsp;$${stats.totalPay.toFixed(2)}</div>
+      </div>
+    </div>
+
+    <div class="card" style="overflow:auto;">
+      <table style="width:100%; border-collapse:collapse; min-width:760px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:10px;border-bottom:1px solid var(--line);">Employee</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Rate</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Shifts</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Hours</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Pay</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${stats.rows.map(r=>`
+            <tr>
+              <td style="padding:10px;border-bottom:1px solid var(--line);">
+                <div style="font-weight:800;">${escapeHTML(r.name)}</div>
+                <div class="note">${escapeHTML(r.id)}</div>
+              </td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right;">$${r.rate.toFixed(2)}</td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right;">${r.shifts}</td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right;">${r.hours.toFixed(2)}</td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right; font-weight:800;">$${r.pay.toFixed(2)}</td>
+            </tr>
+          `).join("") || `<tr><td colspan="5" style="padding:10px;"><div class="note">No shifts in this week.</div></td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `);
+}
+
+let exportWeekKey = null;
+function exportPrevWeek(){ exportWeekKey = addDaysToWeekKey(exportWeekKey, -7); renderWeeklyExport(); }
+function exportNextWeek(){ exportWeekKey = addDaysToWeekKey(exportWeekKey,  7); renderWeeklyExport(); }
+function exportThisWeek(){ exportWeekKey = weekKeyFromDate(new Date()); renderWeeklyExport(); }
+
+async function downloadWeeklySummaryCSV(weekKey){
+  pingActivity();
+  const stats = await computeWeekStats(weekKey);
+
+  let csv = "week,employee_name,employee_id,rate,shifts,hours,pay\n";
+  for(const r of stats.rows){
+    csv += `${weekKey},"${String(r.name).replaceAll('"','""')}",${String(r.id).replaceAll(","," ")},${r.rate.toFixed(2)},${r.shifts},${r.hours.toFixed(2)},${r.pay.toFixed(2)}\n`;
+  }
+
+  const blob = new Blob([csv], { type:"text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `weekly_summary_${weekKey}.csv`;
+  a.click();
+}
+
+async function renderWeeklyExport(){
+  pingActivity();
+  await loadSettings();
+
+  if(!exportWeekKey) exportWeekKey = weekKeyFromDate(new Date());
+  const weekKey = exportWeekKey;
+
+  const stats = await computeWeekStats(weekKey);
+
+  setAppHTML(`
+    ${brandHTML(state.isOwner ? "Admin (Owner) — Weekly Export" : "Admin — Weekly Export")}
+    ${navBarHTML("clock")}
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <button class="btn slim" onclick="exportPrevWeek()">◀ Prev</button>
+        <div style="text-align:center;">
+          <div style="font-weight:800;">Week</div>
+          <div class="note">${weekLabel(weekKey)}</div>
+        </div>
+        <button class="btn slim" onclick="exportNextWeek()">Next ▶</button>
+      </div>
+
+      <div class="row" style="justify-content:center;margin-top:10px;">
+        <button class="btn slim" onclick="exportThisWeek()">This Week</button>
+        <button class="btn accent" onclick="downloadWeeklySummaryCSV('${weekKey}')">Download Summary CSV</button>
+      </div>
+
+      <div class="kpi" style="justify-content:flex-start;margin-top:10px;">
+        <div class="pill"><strong>Total Hours</strong>&nbsp;&nbsp;${stats.totalHours.toFixed(2)}</div>
+        <div class="pill"><strong>Total Pay</strong>&nbsp;&nbsp;$${stats.totalPay.toFixed(2)}</div>
+      </div>
+    </div>
+
+    <div class="card" style="overflow:auto;">
+      <table style="width:100%; border-collapse:collapse; min-width:760px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:10px;border-bottom:1px solid var(--line);">Employee</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Shifts</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Hours</th>
+            <th style="text-align:right;padding:10px;border-bottom:1px solid var(--line);">Pay</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${stats.rows.map(r=>`
+            <tr>
+              <td style="padding:10px;border-bottom:1px solid var(--line);">
+                <div style="font-weight:800;">${escapeHTML(r.name)}</div>
+                <div class="note">${escapeHTML(r.id)} • $${r.rate.toFixed(2)}/hr</div>
+              </td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right;">${r.shifts}</td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right;">${r.hours.toFixed(2)}</td>
+              <td style="padding:10px;border-bottom:1px solid var(--line); text-align:right; font-weight:800;">$${r.pay.toFixed(2)}</td>
+            </tr>
+          `).join("") || `<tr><td colspan="4" style="padding:10px;"><div class="note">No shifts in this week.</div></td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `);
+}
+
+let auditWeekKey = null;
+function auditPrevWeek(){ auditWeekKey = addDaysToWeekKey(auditWeekKey, -7); renderAudit(); }
+function auditNextWeek(){ auditWeekKey = addDaysToWeekKey(auditWeekKey,  7); renderAudit(); }
+function auditThisWeek(){ auditWeekKey = weekKeyFromDate(new Date()); renderAudit(); }
+
+async function renderAudit(){
+  pingActivity();
+  await loadSettings();
+
+  if(!auditWeekKey) auditWeekKey = weekKeyFromDate(new Date());
+  const weekKey = auditWeekKey;
+
+  const items = await getAuditByWeek(weekKey);
+
+  setAppHTML(`
+    ${brandHTML(state.isOwner ? "Admin (Owner) — Audit" : "Admin — Audit")}
+    ${navBarHTML("clock")}
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <button class="btn slim" onclick="auditPrevWeek()">◀ Prev</button>
+        <div style="text-align:center;">
+          <div style="font-weight:800;">Audit Week</div>
+          <div class="note">${weekLabel(weekKey)}</div>
+        </div>
+        <button class="btn slim" onclick="auditNextWeek()">Next ▶</button>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:10px;">
+        <button class="btn slim" onclick="auditThisWeek()">This Week</button>
+      </div>
+    </div>
+
+    <div class="list">
+      ${items.map(x=>`
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div>
+              <div style="font-weight:800;">${escapeHTML(x.type || "Event")}</div>
+              <div class="note">${escapeHTML(x.actor || "")} • ${fmtTimeLocal12(x.at)} • ${fmtDateLocal(x.at)}</div>
+            </div>
+            <div class="badge glow">${escapeHTML(x.employeeName || x.employeeId || "")}</div>
+          </div>
+          ${x.details ? `<div class="note" style="margin-top:10px; white-space:pre-line;">${escapeHTML(x.details)}</div>` : ""}
+        </div>
+      `).join("") || `<div class="card soft"><div class="note">No audit events for this week.</div></div>`}
+    </div>
+  `);
 }
 
 initDB().then(async ()=>{
