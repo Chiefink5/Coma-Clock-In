@@ -628,6 +628,134 @@ async function handleLogin(pin){
   return false;
 }
 
+
+async function renderAdmin(){
+  pingActivity();
+  state.currentView = "admin";
+  state.currentView = "admin";
+  await autoCloseAt1130();
+  await loadSettings();
+
+  const employees = (await getAll("employees"))
+    .slice()
+    .sort((a,b)=> String(a.name||"").localeCompare(String(b.name||"")));
+
+  const shifts = await getAll("shifts");
+  const wk = weekKeyFromDate(new Date());
+
+  setAppHTML(`
+    ${brandHTML(state.isOwner ? "Admin (Owner)" : "Admin")}
+    ${navBarHTML("clock")}
+<div class="hr"></div>
+    <div class="list" id="empList"></div>
+  `);
+
+  const list = qs("#empList");
+
+  if(employees.length === 0){
+    const empty = document.createElement("div");
+    empty.className = "card soft";
+    empty.innerHTML = `<div class="note">No employees yet. Tap “Add Employee”.</div>`;
+    list.appendChild(empty);
+    return;
+  }
+
+  for(const e of employees){
+    const empShifts = shifts
+      .filter(s => s.employeeId === e.id)
+      .sort((a,b)=> new Date(b.in).getTime() - new Date(a.in).getTime());
+
+    let totalAll = 0;
+    empShifts.forEach((s)=>{ if(s.out) totalAll += hoursBetween(s.in, s.out); });
+
+    let totalWeek = 0;
+    empShifts.forEach((s)=>{
+      if(s.out && weekKeyFromDate(new Date(s.in)) === wk){
+        totalWeek += hoursBetween(s.in, s.out);
+      }
+    });
+
+    const recent = empShifts.slice(0, 8);
+
+    const hoursTap = state.isOwner
+      ? `onclick="event.preventDefault(); event.stopPropagation(); openOvertimeModal('${escapeHTML(e.id)}')"`
+      : ``;
+
+    const details = document.createElement("details");
+    details.className = "emp";
+    details.innerHTML = `
+      <summary>
+        <div class="empHead">
+          <div class="empTitle">${escapeHTML(e.name)} <span class="badge ${e.active===false ? "" : "glow"}">${e.active===false ? "Inactive" : "Active"}</span></div>
+          <div class="empMeta">ID: ${escapeHTML(e.id)} • Rate: $${Number(e.rate||0).toFixed(2)}/hr</div>
+        </div>
+        <div class="empTail">
+          <div style="text-align:right;">
+            <div ${hoursTap} style="${state.isOwner ? "cursor:pointer;" : ""}">
+              <strong>${totalWeek.toFixed(2)}</strong> hrs
+            </div>
+            <div style="opacity:.7;">All: ${totalAll.toFixed(2)} hrs</div>
+          </div>
+        </div>
+      </summary>
+
+      <div class="empBody">
+        <div class="row" style="justify-content:flex-start;">
+          <button class="btn slim" onclick="setEmployeeRate('${escapeHTML(e.id)}')">Set Rate</button>
+          <button class="btn slim" onclick="resetEmployeePin('${escapeHTML(e.id)}')">Reset PIN</button>
+          ${e.active===false
+            ? `<button class="btn slim primary" onclick="reactivateEmployee('${escapeHTML(e.id)}')">Reactivate</button>`
+            : `<button class="btn slim danger" onclick="deactivateEmployee('${escapeHTML(e.id)}')">Deactivate</button>`}
+        </div>
+
+        <div class="hr"></div>
+        <div class="note">Recent shifts</div>
+        <div class="list" id="recent_${escapeHTML(e.id)}"></div>
+      </div>
+    `;
+
+    list.appendChild(details);
+
+    const recentList = qs(`#recent_${CSS.escape(e.id)}`);
+
+    if(recent.length === 0){
+      const empty = document.createElement("div");
+      empty.className = "card soft";
+      empty.innerHTML = `<div class="note">No shifts logged.</div>`;
+      recentList.appendChild(empty);
+      continue;
+    }
+
+    for(const s of recent){
+      const inT = s.in ? formatTime(new Date(s.in)) : "--";
+      const outT = s.out ? formatTime(new Date(s.out)) : "--";
+      const dur = s.out ? hoursBetween(s.in, s.out) : 0;
+      const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
+      const buttonsHTML = lockedShift ? `<span class="badge gold">Locked</span>` : `
+          <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+            <button class="btn slim" onclick="editShift('${s.shiftId}')">Edit</button>
+            <button class="btn slim danger" onclick="deleteShift('${s.shiftId}')">Delete</button>
+          </div>`;
+
+      const row = document.createElement("div");
+      row.className = "shiftRow";
+      row.innerHTML = `
+        <div class="left">
+          <div><strong>In:</strong> ${inT}</div>
+          <div><strong>Out:</strong> ${outT}</div>
+          <div class="badge ${s.autoClosed ? "glow" : ""}">${s.autoClosed ? "Auto-closed (11:30)" : "Logged"}</div>
+        </div>
+        <div class="right">
+          ${s.out ? `<div><strong>${dur.toFixed(2)}</strong> hrs</div>` : `<div><strong>Open</strong></div>`}
+          ${buttonsHTML}
+        </div>
+      `;
+      recentList.appendChild(row);
+    }
+  }
+}
+
+
 async function findOpenShift(employeeId){
   const shifts = await getAll("shifts");
   return shifts.find(s => s.employeeId === employeeId && !s.out) || null;
@@ -755,113 +883,48 @@ async function renderEmployee(){
   setAppHTML(`
     ${brandHTML(`Welcome ${escapeHTML(me.name)}!`)}
     ${navBarHTML("clock")}
-    <div class="hr"></div>
-    <div class="list" id="empList"></div>
+    <div class="kpi">
+      <div class="pill"><strong>Earned this week</strong>&nbsp;&nbsp;$${totals.pay.toFixed(2)}</div>
+      <div class="pill"><strong>Rate</strong>&nbsp;&nbsp;$${Number(me.rate||0).toFixed(2)}/hr</div>
+    </div>
+
+    <div class="row">
+      <button class="btn primary shimmer" onclick="clockIn()">Clock In</button>
+      <button class="btn danger shimmer" onclick="clockOut()">Clock Out</button>
+    </div>
+
+    <div class="list" id="shiftList"></div>
   `);
 
-  const list = qs("#empList");
+  const list = qs("#shiftList");
 
-  if(employees.length === 0){
+  if(my.length === 0){
     const empty = document.createElement("div");
     empty.className = "card soft";
-    empty.innerHTML = `<div class="note">No employees yet. Tap “Add Employee”.</div>`;
+    empty.innerHTML = `<div class="note">No shifts yet.</div>`;
     list.appendChild(empty);
     return;
   }
 
-  for(const e of employees){
-    const empShifts = shifts
-      .filter(s => s.employeeId === e.id)
-      .sort((a,b)=> new Date(b.in).getTime() - new Date(a.in).getTime());
+  my.forEach((s)=>{
+    const inT = s.in ? formatTime(new Date(s.in)) : "--";
+    const outT = s.out ? formatTime(new Date(s.out)) : "--";
+    const dur = s.out ? hoursBetween(s.in, s.out) : 0;
 
-    let totalAll = 0;
-    empShifts.forEach((s)=>{ if(s.out) totalAll += hoursBetween(s.in, s.out); });
-
-    let totalWeek = 0;
-    empShifts.forEach((s)=>{
-      if(s.out && weekKeyFromDate(new Date(s.in)) === wk){
-        totalWeek += hoursBetween(s.in, s.out);
-      }
-    });
-
-    const recent = empShifts.slice(0, 8);
-
-    const hoursTap = state.isOwner
-      ? `onclick="event.preventDefault(); event.stopPropagation(); openOvertimeModal('${escapeHTML(e.id)}')"`
-      : ``;
-
-    const details = document.createElement("details");
-    details.className = "emp";
-    details.innerHTML = `
-      <summary>
-        <div class="empHead">
-          <div class="empTitle">${escapeHTML(e.name)} <span class="badge ${e.active===false ? "" : "glow"}">${e.active===false ? "Inactive" : "Active"}</span></div>
-          <div class="empMeta">ID: ${escapeHTML(e.id)} • Rate: $${Number(e.rate||0).toFixed(2)}/hr</div>
-        </div>
-        <div class="empTail">
-          <div style="text-align:right;">
-            <div ${hoursTap} style="${state.isOwner ? "cursor:pointer;" : ""}">
-              <strong>${totalWeek.toFixed(2)}</strong> hrs
-            </div>
-            <div style="opacity:.7;">All: ${totalAll.toFixed(2)} hrs</div>
-          </div>
-        </div>
-      </summary>
-
-      <div class="empBody">
-        <div class="row" style="justify-content:flex-start;">
-          <button class="btn slim" onclick="setEmployeeRate('${escapeHTML(e.id)}')">Set Rate</button>
-          <button class="btn slim" onclick="resetEmployeePin('${escapeHTML(e.id)}')">Reset PIN</button>
-          ${e.active===false
-            ? `<button class="btn slim primary" onclick="reactivateEmployee('${escapeHTML(e.id)}')">Reactivate</button>`
-            : `<button class="btn slim danger" onclick="deactivateEmployee('${escapeHTML(e.id)}')">Deactivate</button>`}
-        </div>
-
-        <div class="hr"></div>
-        <div class="note">Recent shifts</div>
-        <div class="list" id="recent_${escapeHTML(e.id)}"></div>
+    const row = document.createElement("div");
+    row.className = "shiftRow";
+    row.innerHTML = `
+      <div class="left">
+        <div><strong>In:</strong> ${inT}</div>
+        <div><strong>Out:</strong> ${outT}</div>
+        <div class="badge ${s.autoClosed ? "glow" : ""}">${s.autoClosed ? "Auto-closed (11:30)" : "Logged"}</div>
+      </div>
+      <div class="right">
+        ${s.out ? `<div><strong>${dur.toFixed(2)}</strong> hrs</div>` : `<div><strong>Open</strong></div>`}
       </div>
     `;
-
-    list.appendChild(details);
-
-    const recentList = qs(`#recent_${CSS.escape(e.id)}`);
-
-    if(recent.length === 0){
-      const empty = document.createElement("div");
-      empty.className = "card soft";
-      empty.innerHTML = `<div class="note">No shifts logged.</div>`;
-      recentList.appendChild(empty);
-      continue;
-    }
-
-    for(const s of recent){
-      const inT = s.in ? formatTime(new Date(s.in)) : "--";
-      const outT = s.out ? formatTime(new Date(s.out)) : "--";
-      const dur = s.out ? hoursBetween(s.in, s.out) : 0;
-      const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
-      const buttonsHTML = lockedShift ? `<span class="badge gold">Locked</span>` : `
-          <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
-            <button class="btn slim" onclick="editShift('${s.shiftId}')">Edit</button>
-            <button class="btn slim danger" onclick="deleteShift('${s.shiftId}')">Delete</button>
-          </div>`;
-
-      const row = document.createElement("div");
-      row.className = "shiftRow";
-      row.innerHTML = `
-        <div class="left">
-          <div><strong>In:</strong> ${inT}</div>
-          <div><strong>Out:</strong> ${outT}</div>
-          <div class="badge ${s.autoClosed ? "glow" : ""}">${s.autoClosed ? "Auto-closed (11:30)" : "Logged"}</div>
-        </div>
-        <div class="right">
-          ${s.out ? `<div><strong>${dur.toFixed(2)}</strong> hrs</div>` : `<div><strong>Open</strong></div>`}
-          ${buttonsHTML}
-        </div>
-      `;
-      recentList.appendChild(row);
-    }
-  }
+    list.appendChild(row);
+  });
 }
 
 function premiumOrLocked(key, label, renderFn){
