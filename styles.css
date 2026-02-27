@@ -1,0 +1,55 @@
+body {
+  margin:0;
+  font-family:Arial, sans-serif;
+  background:#111;
+  color:#fff;
+}
+
+button {
+  padding:14px;
+  margin:6px;
+  border:none;
+  border-radius:8px;
+  background:#1f1f1f;
+  color:#fff;
+  font-size:16px;
+}
+
+button.primary {
+  background:#4caf50;
+}
+
+button.danger {
+  background:#e53935;
+}
+
+.card {
+  background:#1a1a1a;
+  margin:10px;
+  padding:15px;
+  border-radius:10px;
+}
+
+.pinpad {
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:10px;
+  max-width:300px;
+  margin:auto;
+}
+
+.topbar {
+  text-align:center;
+  padding:20px;
+}
+
+input, select {
+  padding:8px;
+  margin:5px;
+  border-radius:6px;
+  border:none;
+}
+
+.hidden {
+  display:none;
+}
