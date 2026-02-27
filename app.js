@@ -464,6 +464,198 @@ function premiumBtnHTML(featureKey, label, onClick){
 }
 
 
+function formatTime12FromHourMin(h, m){
+  h = Number(h); m = Number(m);
+  const ampm = h >= 12 ? "PM" : "AM";
+  let hh = h % 12; if(hh===0) hh = 12;
+  return `${hh}:${String(m).padStart(2,"0")} ${ampm}`;
+}
+
+function dayLabel(i){
+  return ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i] || "";
+}
+
+function isoDayFromWeekKey(weekKey, dayIndex){
+  const d = new Date(weekKey + "T00:00:00");
+  d.setDate(d.getDate() + dayIndex);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,"0");
+  const dd = String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${dd}`;
+}
+
+function defaultDayEntry(){
+  return { employeeId: "", hours: 8, slot: "AM" };
+}
+
+async function loadSchedule(weekKey){
+  const rec = await get("schedule", weekKey);
+  if(rec && rec.days) return rec;
+  const days = {};
+  for(let i=0;i<7;i++) days[i] = defaultDayEntry();
+  return { id: weekKey, weekKey, days, createdAt: Date.now(), updatedAt: Date.now() };
+}
+
+async function saveSchedule(rec){
+  rec.updatedAt = Date.now();
+  await save("schedule", rec);
+}
+
+function calcAutoTime(hours, slot){
+  hours = Math.max(0, Math.min(13, Number(hours)||0));
+  // Shop open 10:00, close 23:00
+  const OPEN = 10;
+  const CLOSE = 23;
+  let start = OPEN;
+  let end = OPEN + hours;
+  if(slot === "PM"){
+    end = CLOSE;
+    start = Math.max(OPEN, CLOSE - hours);
+  }else{
+    start = OPEN;
+    end = Math.min(CLOSE, OPEN + hours);
+  }
+  return { startH: start, startM: 0, endH: end, endM: 0 };
+}
+
+async function renderScheduleAdminBuilder(){
+  pingActivity();
+  state.currentView = "schedule";
+  const employees = (await getAll("employees")).filter(e=>e && e.active !== false).sort((a,b)=>Number(a.id)-Number(b.id));
+  const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
+  state.scheduleWeekKey = wk;
+
+  const sched = await loadSchedule(wk);
+
+  const dayRows = Array.from({length:7}, (_,i)=>{
+    const entry = sched.days[i] || defaultDayEntry();
+    const hours = Number(entry.hours||0);
+    const slot = entry.slot || "AM";
+    const t = calcAutoTime(hours, slot);
+    const timeLabel = `${formatTime12FromHourMin(t.startH,t.startM)} - ${formatTime12FromHourMin(t.endH,t.endM)}`;
+    const opts = ['<option value="">—</option>'].concat(
+      employees.map(e=>`<option value="${escapeHTML(e.id)}" ${String(e.id)===String(entry.employeeId)?"selected":""}>${escapeHTML(e.name)} (#${escapeHTML(e.id)})</option>`)
+    ).join("");
+    return `
+      <div class="card soft" style="margin-top:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <div style="font-weight:900;font-size:18px;">${dayLabel(i)} <span class="note" style="font-weight:700;">${isoDayFromWeekKey(wk,i)}</span></div>
+          <div class="note" style="text-align:right;">${timeLabel}</div>
+        </div>
+        <div style="margin-top:10px; display:grid; grid-template-columns: 1fr 120px 120px; gap:10px; align-items:center;">
+          <select class="input" id="sch_emp_${i}">${opts}</select>
+          <input class="input" id="sch_hours_${i}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="8">
+          <select class="input" id="sch_slot_${i}">
+            <option value="AM" ${slot==="AM"?"selected":""}>AM</option>
+            <option value="PM" ${slot==="PM"?"selected":""}>PM</option>
+          </select>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  setAppHTML(`
+    <div class="wrap">
+      ${brandHeaderHTML()}
+      ${navBarHTML("schedule")}
+      <div class="card soft" style="margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="font-weight:900;font-size:18px;">Schedule Builder</div>
+            <div class="note">Week starts Monday. Select employee + hours + AM/PM. Times auto-generate using 10AM–11PM.</div>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="changeScheduleWeek(-7)">Prev Week</button>
+            <button class="btn" onclick="changeScheduleWeek(7)">Next Week</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px; justify-content:space-between; align-items:center; flex-wrap:wrap;">
+          <div class="note"><b>Week:</b> ${escapeHTML(wk)}</div>
+          <div class="row">
+            <button class="btn" onclick="clearScheduleWeek()">New Schedule</button>
+            <button class="btn accent" onclick="saveScheduleWeek()">Save</button>
+          </div>
+        </div>
+      </div>
+
+      ${dayRows}
+      <div style="height:18px;"></div>
+    </div>
+  `);
+}
+
+function changeScheduleWeek(deltaDays){
+  pingActivity();
+  const d = new Date((state.scheduleWeekKey || weekKeyFromDate(new Date())) + "T00:00:00");
+  d.setDate(d.getDate() + deltaDays);
+  state.scheduleWeekKey = weekKeyFromDate(d);
+  renderScheduleAdminBuilder();
+}
+
+async function clearScheduleWeek(){
+  pingActivity();
+  const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
+  const days = {};
+  for(let i=0;i<7;i++) days[i] = defaultDayEntry();
+  await saveSchedule({ id:wk, weekKey:wk, days, createdAt: Date.now(), updatedAt: Date.now() });
+  renderScheduleAdminBuilder();
+}
+
+async function saveScheduleWeek(){
+  pingActivity();
+  const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
+  const sched = await loadSchedule(wk);
+  for(let i=0;i<7;i++){
+    const emp = qs("#sch_emp_"+i)?.value || "";
+    const hours = Number(qs("#sch_hours_"+i)?.value || 0);
+    const slot = qs("#sch_slot_"+i)?.value || "AM";
+    sched.days[i] = { employeeId: emp, hours: Math.max(0, Math.min(13, hours||0)), slot };
+  }
+  await saveSchedule(sched);
+  openModal("Saved", `<div class="note">Schedule saved for week ${escapeHTML(wk)}.</div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end;">
+      <button class="btn accent" onclick="closeModal()">OK</button>
+    </div>`);
+}
+
+async function renderScheduleEmployee(){
+  pingActivity();
+  state.currentView = "schedule";
+  const wk = weekKeyFromDate(new Date());
+  const sched = await loadSchedule(wk);
+  const emp = state.currentUser;
+  const empId = emp && (emp.id ?? emp.employeeId);
+  const rows = Array.from({length:7}, (_,i)=>{
+    const entry = sched.days[i] || defaultDayEntry();
+    if(String(entry.employeeId) !== String(empId)) return "";
+    const t = calcAutoTime(entry.hours, entry.slot);
+    const timeLabel = `${formatTime12FromHourMin(t.startH,t.startM)} - ${formatTime12FromHourMin(t.endH,t.endM)}`;
+    return `
+      <div class="card soft" style="margin-top:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-weight:900;font-size:18px;">${dayLabel(i)} <span class="note" style="font-weight:700;">${isoDayFromWeekKey(wk,i)}</span></div>
+          <div class="note">${escapeHTML(timeLabel)}</div>
+        </div>
+        <div class="note" style="margin-top:6px;">${escapeHTML(entry.slot)} • ${escapeHTML(entry.hours)} hour(s)</div>
+      </div>
+    `;
+  }).join("");
+
+  setAppHTML(`
+    <div class="wrap">
+      ${brandHeaderHTML()}
+      ${navBarHTML("schedule")}
+      <div class="card soft" style="margin-top:12px;">
+        <div style="font-weight:900;font-size:18px;">Your Schedule</div>
+        <div class="note">Week: ${escapeHTML(wk)}</div>
+      </div>
+      ${rows || `<div class="card soft" style="margin-top:12px;"><div class="note">No scheduled shifts assigned to you this week.</div></div>`}
+      <div style="height:18px;"></div>
+    </div>
+  `);
+}
+
 function openSchedule(){
   pingActivity();
   if(!hasPremium("schedule")){

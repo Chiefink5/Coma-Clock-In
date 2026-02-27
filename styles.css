@@ -431,3 +431,7 @@ details.emp > summary::-webkit-details-marker{ display:none; }
 .pinError{color:#ff6b6b !important; text-shadow:0 0 14px rgba(255,107,107,.45);}
 
 .form{width:min(520px,92vw);} .lbl{display:block;opacity:.85;font-weight:700;margin-bottom:6px;} .input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:#fff;outline:none;} .input:focus{border-color:rgba(124,92,255,.7);box-shadow:0 0 0 3px rgba(124,92,255,.18);} 
+
+.wrap{max-width:980px;margin:0 auto;padding:18px 16px;}
+
+select.input{appearance:none;}
