@@ -590,15 +590,21 @@ async function renderScheduleAdminBuilder(){
             <div style="font-weight:800;">Employee Slot ${j+1}</div>
             <div class="note">${timeLabel}</div>
           </div>
-          <div style="margin-top:10px; display:grid; grid-template-columns: 1fr 120px 120px 44px; gap:10px; align-items:center;">
-            <select class="input" id="sch_emp_${i}_${j}">${opts}</select>
-            <input class="input" id="sch_hours_${i}_${j}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="8">
-            <select class="input" id="sch_slot_${i}_${j}">
-              <option value="AM" ${slot==="AM"?"selected":""}>AM</option>
-              <option value="PM" ${slot==="PM"?"selected":""}>PM</option>
-            </select>
-            <button class="btn slim danger" onclick="removeScheduleRow(${i},${j})" title="Remove">✕</button>
-          </div>
+          <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
+  <select class="input" id="sch_emp_${i}_${j}">
+    ${opts}
+  </select>
+
+  <div style="display:flex; gap:10px;">
+    <input class="input" style="flex:1;" id="sch_hours_${i}_${j}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="Hours">
+    <select class="input" style="flex:1;" id="sch_slot_${i}_${j}">
+      <option value="AM" ${slot==="AM"?"selected":""}>AM</option>
+      <option value="PM" ${slot==="PM"?"selected":""}>PM</option>
+    </select>
+  </div>
+
+  <button class="btn slim danger" onclick="removeScheduleRow(${i},${j})">Remove Employee</button>
+</div>
         </div>
       `;
     }).join("");
