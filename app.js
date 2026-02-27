@@ -10,6 +10,7 @@ let state = {
   storeName: "Shop Clock",
   logo: "",
   premiumUnlocked: false,
+  showPremiumBar: false,
   premiumFlags: {
     schedule:false,
     payroll:false,
@@ -390,6 +391,17 @@ async function devSaveFlags(){
   await setPremiumFlags(flags);
   closeModal();
 }
+
+function togglePremiumBar(){
+  pingActivity();
+  state.showPremiumBar = !state.showPremiumBar;
+  if(state.isAdmin){
+    renderAdmin();
+  }else{
+    renderEmployee();
+  }
+}
+
 
 async function sendWebhook(payload){
   if(!WEBHOOK_URL || WEBHOOK_URL.includes("PUT_DISCORD_WEBHOOK_URL_HERE")) return;
@@ -870,43 +882,46 @@ async function saveShiftEdit(shiftId, beforeIn, beforeOut){
   const newOut = newOutRaw ? parseLocal(newOutRaw) : null;
 
   if(!newIn) return;
-  const outISO = newOut ? newOut.toISOString() : null;
+  if(newOut && newOut.getTime() < newIn.getTime()) return;
 
-  shift.in = newIn.toISOString();
-  shift.out = outISO;
+  const newInISO = newIn.toISOString();
+  const newOutISO = newOut ? newOut.toISOString() : null;
+
+  // old duration (only if shift was closed)
+  const oldDur = (beforeOut && String(beforeOut).trim()) ? hoursBetween(beforeIn, beforeOut) : 0;
+  const newDur = newOutISO ? hoursBetween(newInISO, newOutISO) : 0;
+  const diffHours = newDur - oldDur;
+
+  shift.in = newInISO;
+  shift.out = newOutISO;
   shift.autoClosed = false;
 
   await save("shifts", shift);
 
-  const beforeHours = beforeOut ? hoursBetween(beforeIn, beforeOut) : 0;
-  const afterHours = shift.out ? hoursBetween(shift.in, shift.out) : 0;
-  const diffHours = afterHours - beforeHours;
+  try{
+    const empInfo = shift.employeeId ? await employeeLabel(shift.employeeId) : { name:"Unknown", id:String(shift.employeeId||"") };
+    const dateStr = fmtDateLocal(shift.in);
 
-  const empInfo = await employeeLabel(shift.employeeId);
-  const dateStr = fmtDateLocal(shift.in);
+    // webhook + audit human-readable
+    await sendWebhook({
+      content: null,
+      embeds: [{
+        title: "Shift Edited",
+        description:
+          `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nBefore\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}\nAfter\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\nHours Difference\n> ${fmtHoursDeltaWords(diffHours)}`,
+        color: 0x7C5CFF
+      }]
+    });
 
-  await addAudit({
-    weekKey: weekKeyFromDate(new Date(shift.in)),
-    type: "Shift Edited",
-    actor: state.isOwner ? "Owner" : "Admin",
-    employeeId: shift.employeeId,
-    employeeName: empInfo.name,
-    details: `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nBefore\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}\nAfter\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\nHours Difference\n> ${fmtHoursDeltaWords(diffHours)}`
-  });
-
-  await sendWebhook({
-    content: `Shift Edited`,
-    embeds: [{
-      title: "Shift Edited",
-      fields: [
-        { name: "Employee", value: `> ${empInfo.name} (${empInfo.id})`, inline: false },
-        { name: "Date", value: `${dateStr}`, inline: true },
-        { name: "Before", value: `> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}`, inline: false },
-        { name: "After", value: `> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}`, inline: false },
-        { name: "Hours Difference", value: `> ${fmtHoursDeltaWords(diffHours)}`, inline: false }
-      ]
-    }]
-  });
+    await addAudit({
+      weekKey: weekKeyFromDate(new Date(shift.in)),
+      type: "Shift Edited",
+      actor: state.isOwner ? "Owner" : "Admin",
+      employeeId: String(shift.employeeId || ""),
+      employeeName: empInfo.name,
+      details: `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nBefore\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}\nAfter\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\nHours Difference\n> ${fmtHoursDeltaWords(diffHours)}`
+    });
+  }catch(e){}
 
   closeModal();
   renderAdmin();
@@ -930,30 +945,30 @@ async function confirmDeleteShift(shiftId){
 
   await del("shifts", shiftId);
 
-  const empInfo = await employeeLabel(shift.employeeId);
-  const dateStr = fmtDateLocal(shift.in);
+  try{
+    const empInfo = shift.employeeId ? await employeeLabel(shift.employeeId) : { name:"Unknown", id:String(shift.employeeId||"") };
+    const dateStr = fmtDateLocal(shift.in);
+    const dur = shift.out ? hoursBetween(shift.in, shift.out) : 0;
 
-  await addAudit({
-    weekKey: weekKeyFromDate(new Date(shift.in)),
-    type: "Shift Edited",
-    actor: state.isOwner ? "Owner" : "Admin",
-    employeeId: shift.employeeId,
-    employeeName: empInfo.name,
-    details: `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nBefore\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}\nAfter\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\nHours Difference\n> ${fmtHoursDeltaWords(diffHours)}`
-  });
-  const dur = shift.out ? hoursBetween(shift.in, shift.out) : 0;
+    await addAudit({
+      weekKey: weekKeyFromDate(new Date(shift.in)),
+      type: "Shift Deleted",
+      actor: state.isOwner ? "Owner" : "Admin",
+      employeeId: String(shift.employeeId || ""),
+      employeeName: empInfo.name,
+      details: `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nShift\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\n> Length: ${dur.toFixed(2)} hrs`
+    });
 
-  await sendWebhook({
-    content: `Shift Deleted`,
-    embeds: [{
-      title: "Shift Deleted",
-      fields: [
-        { name: "Employee", value: `> ${empInfo.name} (${empInfo.id})`, inline: false },
-        { name: "Date", value: `${dateStr}`, inline: true },
-        { name: "Shift", value: `> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\n> Length: ${dur.toFixed(2)} hrs`, inline: false }
-      ]
-    }]
-  });
+    await sendWebhook({
+      content: null,
+      embeds: [{
+        title: "Shift Deleted",
+        description:
+          `Employee\n> ${empInfo.name} (${empInfo.id})\nDate\n${dateStr}\nShift\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\n> Length: ${dur.toFixed(2)} hrs`,
+        color: 0xE74C3C
+      }]
+    });
+  }catch(e){}
 
   closeModal();
   renderAdmin();
