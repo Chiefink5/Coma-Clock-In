@@ -15,13 +15,19 @@ let logoutTimer = null;
 let modalEl = null;
 
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-let schedState = { weekKey: null, selected: null };
+const HOURS_OPTIONS = [4,5,6,7,8,9,10,11,12,13];
+
+// business hours (24h clock) 10:00 -> 23:00
+const OPEN_MIN = 10 * 60;
+const CLOSE_MIN = 23 * 60;
+
+let schedState = { weekKey: null };
 
 function qs(sel){ return document.querySelector(sel); }
 
 function initDB(){
   return new Promise((res)=>{
-    const request = indexedDB.open("clockDB", 2);
+    const request = indexedDB.open("clockDB", 3);
     request.onupgradeneeded = (e)=>{
       db = e.target.result;
       if(!db.objectStoreNames.contains("employees")) db.createObjectStore("employees", { keyPath:"id" });
@@ -98,6 +104,22 @@ function weekKeyFromDate(date){
   const m = String(ws.getMonth()+1).padStart(2,"0");
   const d = String(ws.getDate()).padStart(2,"0");
   return `${y}-${m}-${d}`;
+}
+
+function addDaysToWeekKey(weekKey, deltaDays){
+  const d = new Date(weekKey + "T00:00:00");
+  d.setDate(d.getDate() + deltaDays);
+  return weekKeyFromDate(d);
+}
+
+function weekLabel(weekKey){
+  const d = new Date(weekKey + "T00:00:00");
+  const end = new Date(d); end.setDate(end.getDate()+6);
+  const mm1 = String(d.getMonth()+1).padStart(2,"0");
+  const dd1 = String(d.getDate()).padStart(2,"0");
+  const mm2 = String(end.getMonth()+1).padStart(2,"0");
+  const dd2 = String(end.getDate()).padStart(2,"0");
+  return `${mm1}/${dd1} - ${mm2}/${dd2}`;
 }
 
 function clearLogoutTimer(){
@@ -180,11 +202,13 @@ function navBarHTML(active){
         ? `<button class="btn ${active==="clock"?"accent":""}" onclick="renderEmployee()">Clock</button>`
         : `<button class="btn ${active==="clock"?"accent":""}" onclick="renderAdmin()">Clock</button>`
       }
-      <button class="btn ${active==="schedule"?"accent":""}" onclick="${isEmp ? "renderScheduleEmployee()" : "renderScheduleAdmin()"}">Schedule</button>
+      <button class="btn ${active==="schedule"?"accent":""}" onclick="${isEmp ? "renderScheduleEmployee()" : "renderScheduleAdminBuilder()"}">Schedule</button>
       <button class="btn" onclick="renderLogin()">Log Out</button>
     </div>
   `;
 }
+
+/* ---------- Webhook human formatting ---------- */
 
 function fmtDateLocal(iso){
   if(!iso) return "--";
@@ -239,6 +263,8 @@ async function sendWebhook(payload){
   }catch(e){}
 }
 
+/* ---------- Persistence hardening ---------- */
+
 async function requestPersistentStorage(){
   try{
     if(navigator.storage && navigator.storage.persist){
@@ -246,6 +272,8 @@ async function requestPersistentStorage(){
     }
   }catch(e){}
 }
+
+/* ---------- Clock features ---------- */
 
 function renderLogin(){
   clearLogoutTimer();
@@ -478,6 +506,8 @@ async function renderEmployee(){
   });
 }
 
+/* ---------- Admin / employee management ---------- */
+
 async function openAddEmployeeModal(){
   pingActivity();
   openModal("Add Employee", `
@@ -638,6 +668,8 @@ async function reactivateEmployee(id){
   renderAdmin();
 }
 
+/* ---------- Shift editing / deletion (webhooked) ---------- */
+
 function parseLocal(str){
   const m = String(str||"").trim().match(/^(\d{2})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2})$/);
   if(!m) return null;
@@ -752,6 +784,8 @@ async function confirmDeleteShift(shiftId){
   renderAdmin();
 }
 
+/* ---------- Export / Import ---------- */
+
 async function exportCSV(){
   pingActivity();
   const shifts = await getAll("shifts");
@@ -815,6 +849,300 @@ function importJSON(e){
   reader.readAsText(file);
   e.target.value = "";
 }
+
+/* ---------- Schedule Builder ---------- */
+/*
+Data model (one employee per day, per week):
+id = `${weekKey}|${dayIndex}`
+
+{
+  id, weekKey, dayIndex,
+  employeeId: "EMP1" or "" (Off),
+  hours: 8,
+  period: "AM" | "PM",
+  start: "10:00",
+  end: "18:00",
+  updatedAt: ISO
+}
+*/
+
+function pad2(n){ return String(n).padStart(2,"0"); }
+
+function minsToHHMM(mins){
+  const h = Math.floor(mins/60);
+  const m = mins%60;
+  return `${pad2(h)}:${pad2(m)}`;
+}
+
+function hhmmToMins(hhmm){
+  const m = String(hhmm||"").match(/^(\d{2}):(\d{2})$/);
+  if(!m) return null;
+  const h = parseInt(m[1],10);
+  const mi = parseInt(m[2],10);
+  if(!Number.isFinite(h) || !Number.isFinite(mi)) return null;
+  return h*60 + mi;
+}
+
+function hhmmTo12(hhmm){
+  const mins = hhmmToMins(hhmm);
+  if(mins == null) return "--";
+  let h = Math.floor(mins/60);
+  const m = pad2(mins%60);
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if(h===0) h=12;
+  return `${h}:${m} ${ampm}`;
+}
+
+function computeShift(hours, period){
+  const h = Math.max(0, Math.min(13, parseInt(hours,10) || 0));
+  if(period === "PM"){
+    const end = CLOSE_MIN;
+    const start = Math.max(OPEN_MIN, end - h*60);
+    return { start: minsToHHMM(start), end: minsToHHMM(end) };
+  }
+  // AM default
+  const start = OPEN_MIN;
+  const end = Math.min(CLOSE_MIN, start + h*60);
+  return { start: minsToHHMM(start), end: minsToHHMM(end) };
+}
+
+function schedKey(weekKey, dayIndex){
+  return `${weekKey}|${dayIndex}`;
+}
+
+async function getScheduleWeekMap(weekKey){
+  const all = await getAll("schedule");
+  const map = {};
+  for(const x of all){
+    if(x && x.weekKey === weekKey && Number.isInteger(x.dayIndex) && x.dayIndex>=0 && x.dayIndex<=6){
+      map[x.dayIndex] = x;
+    } else if(x && typeof x.id === "string" && x.id.startsWith(weekKey + "|")){
+      // tolerate older shapes that still use this id scheme
+      const parts = x.id.split("|");
+      if(parts.length === 2){
+        const di = parseInt(parts[1],10);
+        if(di>=0 && di<=6) map[di] = x;
+      }
+    }
+  }
+  return map;
+}
+
+async function setScheduleDay(weekKey, dayIndex, employeeId, hours, period){
+  const empId = String(employeeId || "");
+  const hrs = parseInt(hours,10) || 8;
+  const per = period === "PM" ? "PM" : "AM";
+
+  if(!empId){
+    // Off: delete record
+    await del("schedule", schedKey(weekKey, dayIndex));
+    return;
+  }
+
+  const shift = computeShift(hrs, per);
+  const rec = {
+    id: schedKey(weekKey, dayIndex),
+    weekKey,
+    dayIndex,
+    employeeId: empId,
+    hours: hrs,
+    period: per,
+    start: shift.start,
+    end: shift.end,
+    updatedAt: new Date().toISOString()
+  };
+  await save("schedule", rec);
+}
+
+async function clearScheduleWeek(weekKey){
+  const all = await getAll("schedule");
+  for(const x of all){
+    if(x && x.weekKey === weekKey){
+      await del("schedule", x.id);
+    } else if(x && typeof x.id === "string" && x.id.startsWith(weekKey + "|")){
+      await del("schedule", x.id);
+    }
+  }
+}
+
+async function copyScheduleWeek(fromWeekKey, toWeekKey){
+  await clearScheduleWeek(toWeekKey);
+  const fromMap = await getScheduleWeekMap(fromWeekKey);
+  for(const di of Object.keys(fromMap)){
+    const dayIndex = parseInt(di,10);
+    const x = fromMap[dayIndex];
+    if(x && x.employeeId){
+      await setScheduleDay(toWeekKey, dayIndex, x.employeeId, x.hours || 8, x.period || "AM");
+    }
+  }
+}
+
+function schedulePrevWeek(){ schedState.weekKey = addDaysToWeekKey(schedState.weekKey, -7); renderScheduleAdminBuilder(); }
+function scheduleNextWeek(){ schedState.weekKey = addDaysToWeekKey(schedState.weekKey,  7); renderScheduleAdminBuilder(); }
+function scheduleThisWeek(){ schedState.weekKey = weekKeyFromDate(new Date()); renderScheduleAdminBuilder(); }
+
+async function scheduleCopyLastWeek(){
+  pingActivity();
+  const from = addDaysToWeekKey(schedState.weekKey, -7);
+  await copyScheduleWeek(from, schedState.weekKey);
+  renderScheduleAdminBuilder();
+}
+
+async function scheduleClearWeek(){
+  pingActivity();
+  await clearScheduleWeek(schedState.weekKey);
+  renderScheduleAdminBuilder();
+}
+
+async function scheduleDayChanged(dayIndex){
+  pingActivity();
+  const weekKey = schedState.weekKey;
+  const emp = qs(`#sched_emp_${dayIndex}`)?.value || "";
+  const hrs = qs(`#sched_hrs_${dayIndex}`)?.value || "8";
+  const per = qs(`#sched_per_${dayIndex}`)?.value || "AM";
+
+  await setScheduleDay(weekKey, dayIndex, emp, hrs, per);
+  renderScheduleAdminBuilder();
+}
+
+async function renderScheduleAdminBuilder(){
+  pingActivity();
+  await loadSettings();
+
+  if(!schedState.weekKey) schedState.weekKey = weekKeyFromDate(new Date());
+  const weekKey = schedState.weekKey;
+
+  const employees = (await getAll("employees"))
+    .filter(e => e.active !== false)
+    .sort((a,b)=> String(a.name||"").localeCompare(String(b.name||"")));
+
+  const weekMap = await getScheduleWeekMap(weekKey);
+
+  setAppHTML(`
+    ${brandHTML(state.isOwner ? "Admin (Owner) — Schedule" : "Admin — Schedule")}
+    ${navBarHTML("schedule")}
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <button class="btn slim" onclick="schedulePrevWeek()">◀ Prev</button>
+        <div style="text-align:center;">
+          <div style="font-weight:700;">Week</div>
+          <div style="opacity:.85;">${weekLabel(weekKey)}</div>
+        </div>
+        <button class="btn slim" onclick="scheduleNextWeek()">Next ▶</button>
+      </div>
+
+      <div class="row" style="justify-content:center;margin-top:10px;">
+        <button class="btn slim" onclick="scheduleThisWeek()">This Week</button>
+        <button class="btn slim" onclick="scheduleCopyLastWeek()">Copy Last Week</button>
+        <button class="btn slim danger" onclick="scheduleClearWeek()">Clear Week</button>
+      </div>
+
+      <div class="note" style="margin-top:10px;">
+        Pick an employee, hours, and AM/PM. It auto-builds a shift inside shop hours (10:00 AM – 11:00 PM).
+      </div>
+    </div>
+
+    <div class="list" id="schedDays"></div>
+  `);
+
+  const wrap = qs("#schedDays");
+
+  for(let dayIndex=0; dayIndex<7; dayIndex++){
+    const rec = weekMap[dayIndex] || null;
+    const employeeId = rec?.employeeId || "";
+    const hours = rec?.hours || 8;
+    const period = rec?.period || "AM";
+    const shift = employeeId ? computeShift(hours, period) : null;
+    const preview = employeeId ? `${hhmmTo12(shift.start)} – ${hhmmTo12(shift.end)}` : "Off";
+
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+        <div>
+          <div style="font-weight:800; font-size:16px;">${DAYS[dayIndex]}</div>
+          <div class="note">${preview}</div>
+        </div>
+        <div class="badge ${employeeId ? "glow" : ""}">${employeeId ? "Scheduled" : "Off"}</div>
+      </div>
+
+      <div class="grid2" style="margin-top:12px;">
+        <div>
+          <div class="note">Employee</div>
+          <select class="field" id="sched_emp_${dayIndex}" onchange="scheduleDayChanged(${dayIndex})">
+            <option value="">Off</option>
+            ${employees.map(e=>`<option value="${escapeHTML(e.id)}" ${e.id===employeeId?"selected":""}>${escapeHTML(e.name)} (${escapeHTML(e.id)})</option>`).join("")}
+          </select>
+        </div>
+
+        <div>
+          <div class="note">Hours</div>
+          <select class="field" id="sched_hrs_${dayIndex}" onchange="scheduleDayChanged(${dayIndex})" ${employeeId ? "" : "disabled"}>
+            ${HOURS_OPTIONS.map(h=>`<option value="${h}" ${h===hours?"selected":""}>${h}</option>`).join("")}
+          </select>
+        </div>
+
+        <div>
+          <div class="note">AM / PM</div>
+          <select class="field" id="sched_per_${dayIndex}" onchange="scheduleDayChanged(${dayIndex})" ${employeeId ? "" : "disabled"}>
+            <option value="AM" ${period==="AM"?"selected":""}>AM (start 10:00)</option>
+            <option value="PM" ${period==="PM"?"selected":""}>PM (end 11:00)</option>
+          </select>
+        </div>
+
+        <div>
+          <div class="note">Auto shift</div>
+          <div class="field" style="display:flex; align-items:center; justify-content:center; border-style:dashed; opacity:.95;">
+            ${employeeId ? `${shift.start}–${shift.end}` : "—"}
+          </div>
+        </div>
+      </div>
+    `;
+    wrap.appendChild(card);
+  }
+}
+
+async function renderScheduleEmployee(){
+  pingActivity();
+  await loadSettings();
+
+  const me = state.currentUser;
+  const weekKey = weekKeyFromDate(new Date());
+  const weekMap = await getScheduleWeekMap(weekKey);
+
+  setAppHTML(`
+    ${brandHTML(`Welcome ${escapeHTML(me.name)} — Schedule`)}
+    ${navBarHTML("schedule")}
+    <div class="card">
+      <div style="font-weight:800;">This Week</div>
+      <div class="note">${weekLabel(weekKey)}</div>
+    </div>
+    <div class="list" id="schedList"></div>
+  `);
+
+  const list = qs("#schedList");
+
+  for(let i=0;i<7;i++){
+    const rec = weekMap[i];
+    const isMe = rec && rec.employeeId === me.id;
+    const label = isMe ? `${hhmmTo12(rec.start)} – ${hhmmTo12(rec.end)}` : "Off";
+
+    const row = document.createElement("div");
+    row.className = "shiftRow";
+    row.innerHTML = `
+      <div class="left">
+        <div><strong>${DAYS[i]}</strong></div>
+        <div class="badge ${isMe ? "glow" : ""}">${label}</div>
+      </div>
+      <div class="right"></div>
+    `;
+    list.appendChild(row);
+  }
+}
+
+/* ---------- Admin page ---------- */
 
 async function renderAdmin(){
   pingActivity();
@@ -943,258 +1271,6 @@ async function renderAdmin(){
       `;
       recentList.appendChild(row);
     }
-  }
-}
-
-function weekLabel(weekKey){
-  const d = new Date(weekKey + "T00:00:00");
-  const end = new Date(d); end.setDate(end.getDate()+6);
-  const mm1 = String(d.getMonth()+1).padStart(2,"0");
-  const dd1 = String(d.getDate()).padStart(2,"0");
-  const mm2 = String(end.getMonth()+1).padStart(2,"0");
-  const dd2 = String(end.getDate()).padStart(2,"0");
-  return `${mm1}/${dd1} - ${mm2}/${dd2}`;
-}
-
-function addDaysToWeekKey(weekKey, deltaDays){
-  const d = new Date(weekKey + "T00:00:00");
-  d.setDate(d.getDate() + deltaDays);
-  return weekKeyFromDate(d);
-}
-
-function schedId(weekKey, employeeId, dayIndex){
-  return `${weekKey}|${employeeId}|${dayIndex}`;
-}
-
-async function getScheduleForWeek(weekKey){
-  const all = await getAll("schedule");
-  return all.filter(x => x.weekKey === weekKey);
-}
-
-async function getScheduleCell(weekKey, employeeId, dayIndex){
-  return await get("schedule", schedId(weekKey, employeeId, dayIndex));
-}
-
-async function setScheduleCell(weekKey, employeeId, dayIndex, start, end){
-  const entry = {
-    id: schedId(weekKey, employeeId, dayIndex),
-    weekKey,
-    employeeId,
-    dayIndex,
-    start: start || "",
-    end: end || "",
-    updatedAt: new Date().toISOString()
-  };
-  await save("schedule", entry);
-}
-
-async function clearScheduleCell(weekKey, employeeId, dayIndex){
-  await del("schedule", schedId(weekKey, employeeId, dayIndex));
-}
-
-async function clearScheduleWeek(weekKey){
-  const all = await getScheduleForWeek(weekKey);
-  for(const x of all) await del("schedule", x.id);
-}
-
-async function copyScheduleWeek(fromWeekKey, toWeekKey){
-  await clearScheduleWeek(toWeekKey);
-  const from = await getScheduleForWeek(fromWeekKey);
-  for(const x of from){
-    await setScheduleCell(toWeekKey, x.employeeId, x.dayIndex, x.start, x.end);
-  }
-}
-
-function schedulePrevWeek(){ schedState.weekKey = addDaysToWeekKey(schedState.weekKey, -7); schedState.selected=null; renderScheduleAdmin(); }
-function scheduleNextWeek(){ schedState.weekKey = addDaysToWeekKey(schedState.weekKey,  7); schedState.selected=null; renderScheduleAdmin(); }
-function scheduleThisWeek(){ schedState.weekKey = weekKeyFromDate(new Date()); schedState.selected=null; renderScheduleAdmin(); }
-
-async function scheduleCopyLastWeek(){
-  pingActivity();
-  const from = addDaysToWeekKey(schedState.weekKey, -7);
-  await copyScheduleWeek(from, schedState.weekKey);
-  renderScheduleAdmin();
-}
-
-async function scheduleClearWeek(){
-  pingActivity();
-  await clearScheduleWeek(schedState.weekKey);
-  schedState.selected = null;
-  renderScheduleAdmin();
-}
-
-function scheduleSelectCell(employeeId, dayIndex){
-  schedState.selected = { employeeId, dayIndex };
-  renderScheduleAdmin();
-}
-
-async function scheduleSave(){
-  pingActivity();
-  const sel = schedState.selected;
-  if(!sel) return;
-
-  const start = (qs("#schedStart")?.value || "").trim();
-  const end = (qs("#schedEnd")?.value || "").trim();
-
-  if(!start && !end){
-    await clearScheduleCell(schedState.weekKey, sel.employeeId, sel.dayIndex);
-  } else {
-    await setScheduleCell(schedState.weekKey, sel.employeeId, sel.dayIndex, start, end);
-  }
-
-  renderScheduleAdmin();
-}
-
-async function scheduleClear(){
-  pingActivity();
-  const sel = schedState.selected;
-  if(!sel) return;
-  await clearScheduleCell(schedState.weekKey, sel.employeeId, sel.dayIndex);
-  renderScheduleAdmin();
-}
-
-async function renderScheduleAdmin(){
-  pingActivity();
-  await loadSettings();
-
-  if(!schedState.weekKey) schedState.weekKey = weekKeyFromDate(new Date());
-
-  const employees = (await getAll("employees"))
-    .filter(e => e.active !== false)
-    .sort((a,b)=> String(a.name||"").localeCompare(String(b.name||"")));
-
-  const weekKey = schedState.weekKey;
-  const weekData = await getScheduleForWeek(weekKey);
-
-  let html = `
-    ${brandHTML(state.isOwner ? "Admin (Owner) — Schedule" : "Admin — Schedule")}
-    ${navBarHTML("schedule")}
-
-    <div class="card">
-      <div class="row" style="justify-content:space-between;">
-        <button class="btn slim" onclick="schedulePrevWeek()">◀ Prev</button>
-        <div style="text-align:center;">
-          <div style="font-weight:700;">Week</div>
-          <div style="opacity:.85;">${weekLabel(weekKey)}</div>
-        </div>
-        <button class="btn slim" onclick="scheduleNextWeek()">Next ▶</button>
-      </div>
-      <div class="row" style="justify-content:center;margin-top:10px;">
-        <button class="btn slim" onclick="scheduleThisWeek()">This Week</button>
-        <button class="btn slim" onclick="scheduleCopyLastWeek()">Copy Last Week</button>
-        <button class="btn slim danger" onclick="scheduleClearWeek()">Clear Week</button>
-      </div>
-    </div>
-
-    <div class="card" style="overflow:auto;">
-      <table style="width:100%; border-collapse:collapse; min-width:720px;">
-        <thead>
-          <tr>
-            <th style="text-align:left;padding:10px;border-bottom:1px solid var(--line);">Employee</th>
-            ${DAYS.map(d=>`<th style="text-align:center;padding:10px;border-bottom:1px solid var(--line);">${d}</th>`).join("")}
-          </tr>
-        </thead>
-        <tbody>
-          ${employees.map(emp=>{
-            return `
-              <tr>
-                <td style="padding:10px;border-bottom:1px solid var(--line); white-space:nowrap;">
-                  <div style="font-weight:700;">${escapeHTML(emp.name)}</div>
-                  <div style="opacity:.75;font-size:12px;">${escapeHTML(emp.id)}</div>
-                </td>
-                ${DAYS.map((_,dayIndex)=>{
-                  const cell = weekData.find(x => x.employeeId === emp.id && x.dayIndex === dayIndex);
-                  const label = cell && cell.start && cell.end ? `${cell.start}–${cell.end}` : "Off";
-                  const isSel = schedState.selected && schedState.selected.employeeId===emp.id && schedState.selected.dayIndex===dayIndex;
-                  return `
-                    <td
-                      onclick="scheduleSelectCell('${escapeHTML(emp.id)}',${dayIndex})"
-                      style="padding:10px;border-bottom:1px solid var(--line); text-align:center; cursor:pointer; ${isSel ? "outline:2px solid rgba(124,92,255,.6); outline-offset:-2px; border-radius:10px;" : ""}"
-                    >
-                      <span class="badge ${cell && cell.start && cell.end ? "glow" : ""}">${label}</span>
-                    </td>
-                  `;
-                }).join("")}
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
-
-    <div class="card" id="schedEditor"></div>
-  `;
-
-  setAppHTML(html);
-
-  const editor = qs("#schedEditor");
-  if(!schedState.selected){
-    editor.innerHTML = `<div class="note">Tap a cell above to set a shift.</div>`;
-    return;
-  }
-
-  const { employeeId, dayIndex } = schedState.selected;
-  const emp = await get("employees", employeeId);
-  const existing = await getScheduleCell(weekKey, employeeId, dayIndex);
-
-  const startVal = existing?.start || "";
-  const endVal = existing?.end || "";
-
-  editor.innerHTML = `
-    <div style="font-weight:700;font-size:16px;">Edit Shift</div>
-    <div class="note" style="margin-top:6px;">${escapeHTML(emp?.name || "Employee")} • ${DAYS[dayIndex]} • Week ${weekLabel(weekKey)}</div>
-    <div class="grid2" style="margin-top:12px;">
-      <div>
-        <div class="note">Start</div>
-        <input class="field" id="schedStart" type="time" value="${startVal}">
-      </div>
-      <div>
-        <div class="note">End</div>
-        <input class="field" id="schedEnd" type="time" value="${endVal}">
-      </div>
-    </div>
-    <div class="row" style="justify-content:flex-end;margin-top:12px;">
-      <button class="btn" onclick="scheduleSave()">Save</button>
-      <button class="btn danger" onclick="scheduleClear()">Clear</button>
-    </div>
-  `;
-}
-
-async function renderScheduleEmployee(){
-  pingActivity();
-  await loadSettings();
-
-  const me = state.currentUser;
-  const weekKey = weekKeyFromDate(new Date());
-  const weekData = await getScheduleForWeek(weekKey);
-  const mine = weekData.filter(x => x.employeeId === me.id).sort((a,b)=> a.dayIndex - b.dayIndex);
-
-  setAppHTML(`
-    ${brandHTML(`Welcome ${escapeHTML(me.name)} — Schedule`)}
-    ${navBarHTML("schedule")}
-    <div class="card">
-      <div style="font-weight:700;">This Week</div>
-      <div class="note">${weekLabel(weekKey)}</div>
-    </div>
-    <div class="list" id="schedList"></div>
-  `);
-
-  const list = qs("#schedList");
-
-  for(let i=0;i<7;i++){
-    const entry = mine.find(x => x.dayIndex === i);
-    const label = entry && entry.start && entry.end ? `${entry.start} – ${entry.end}` : "Off";
-
-    const row = document.createElement("div");
-    row.className = "shiftRow";
-    row.innerHTML = `
-      <div class="left">
-        <div><strong>${DAYS[i]}</strong></div>
-        <div class="badge ${entry && entry.start && entry.end ? "glow" : ""}">${label}</div>
-      </div>
-      <div class="right"></div>
-    `;
-    list.appendChild(row);
   }
 }
 
