@@ -1,13 +1,15 @@
 const ADMIN_PIN = "9999";
 const OWNER_PIN = "1421";
 const WEBHOOK_URL = "PUT_DISCORD_WEBHOOK_URL_HERE";
+const DEV_UNLOCK_CODE = "4517";
 
 let state = {
   currentUser: null,
   isAdmin: false,
   isOwner: false,
   storeName: "Shop Clock",
-  logo: ""
+  logo: "",
+  premiumUnlocked: false
 };
 
 let db;
@@ -144,8 +146,10 @@ function pingActivity(){
 async function loadSettings(){
   const storeName = await get("settings","storeName");
   const logo = await get("settings","logo");
+  const premium = await get("settings","premiumUnlocked");
   if(storeName && typeof storeName.value === "string") state.storeName = storeName.value;
   if(logo && typeof logo.value === "string") state.logo = logo.value;
+  state.premiumUnlocked = !!(premium && premium.value === true);
 }
 
 async function saveSetting(key, value){
@@ -202,10 +206,101 @@ function navBarHTML(active){
         ? `<button class="btn ${active==="clock"?"accent":""}" onclick="renderEmployee()">Clock</button>`
         : `<button class="btn ${active==="clock"?"accent":""}" onclick="renderAdmin()">Clock</button>`
       }
-      <button class="btn ${active==="schedule"?"accent":""}" onclick="${isEmp ? "renderScheduleEmployee()" : "renderScheduleAdminBuilder()"}">Schedule</button>
+      <button class="btn ${active==="schedule"?"accent":""}" onclick="openSchedule()">Schedule</button>
       <button class="btn" onclick="renderLogin()">Log Out</button>
     </div>
   `;
+}
+
+function renderPremiumLocked(){
+  const who = state.isAdmin ? (state.isOwner ? "Admin (Owner)" : "Admin") : `Welcome ${escapeHTML(state.currentUser?.name || "")}!`;
+  setAppHTML(`
+    ${brandHTML(who)}
+    <div class="card">
+      <div style="font-weight:800; font-size:16px;">Premium Feature</div>
+      <div class="note" style="margin-top:8px;">
+        Scheduling is part of the Premium package.
+      </div>
+      <div class="note" style="margin-top:8px;">
+        If you’d like this enabled, contact the developer.
+      </div>
+      <div class="row" style="justify-content:center;margin-top:12px;">
+        <button class="btn" onclick="${state.isAdmin ? "renderAdmin()" : "renderEmployee()"}">Back</button>
+      </div>
+    </div>
+  `);
+}
+
+function openSchedule(){
+  pingActivity();
+  if(!state.premiumUnlocked){
+    renderPremiumLocked();
+    return;
+  }
+  if(state.isAdmin){
+    renderScheduleAdminBuilder();
+  }else{
+    renderScheduleEmployee();
+  }
+}
+
+async function setPremiumUnlocked(value){
+  await save("settings", { key:"premiumUnlocked", value: !!value });
+  state.premiumUnlocked = !!value;
+}
+
+function setupDevLongPress(btn){
+  let timer = null;
+
+  const start = ()=>{
+    timer = setTimeout(()=>{
+      timer = null;
+      openDevUnlockModal();
+    }, 5000);
+  };
+
+  const cancel = ()=>{
+    if(timer){ clearTimeout(timer); timer = null; }
+  };
+
+  btn.addEventListener("pointerdown", start);
+  btn.addEventListener("pointerup", cancel);
+  btn.addEventListener("pointercancel", cancel);
+  btn.addEventListener("pointerleave", cancel);
+}
+
+function openDevUnlockModal(){
+  pingActivity();
+  openModal("Developer Unlock", `
+    <div class="note">Enter developer code to toggle Premium scheduling.</div>
+    <div style="margin-top:10px;">
+      <input class="field" id="devUnlockCode" placeholder="Developer code" inputmode="numeric">
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px;">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn accent" onclick="applyDevUnlock()">Unlock</button>
+      <button class="btn danger" onclick="applyDevLock()">Lock</button>
+    </div>
+  `);
+}
+
+async function applyDevUnlock(){
+  pingActivity();
+  const code = (qs("#devUnlockCode")?.value || "").trim();
+  if(code !== DEV_UNLOCK_CODE) return;
+  await setPremiumUnlocked(true);
+  closeModal();
+  // If user was viewing locked screen, take them into schedule (admin/employee)
+  openSchedule();
+}
+
+async function applyDevLock(){
+  pingActivity();
+  const code = (qs("#devUnlockCode")?.value || "").trim();
+  if(code !== DEV_UNLOCK_CODE) return;
+  await setPremiumUnlocked(false);
+  closeModal();
+  if(state.isAdmin) renderAdmin(); else renderEmployee();
 }
 
 /* ---------- Webhook human formatting ---------- */
@@ -304,6 +399,7 @@ function renderLogin(){
       display.textContent = pin ? "•".repeat(pin.length) : "";
     };
     pad.appendChild(b);
+    if(k===5) setupDevLongPress(b);
   });
 }
 
