@@ -38,7 +38,7 @@ function qs(sel){ return document.querySelector(sel); }
 
 function initDB(){
   return new Promise((res)=>{
-    const request = indexedDB.open("clockDB", 6);
+    const request = indexedDB.open("clockDB", 4);
     request.onupgradeneeded = (e)=>{
       db = e.target.result;
       if(!db.objectStoreNames.contains("employees")) db.createObjectStore("employees", { keyPath:"id" });
@@ -436,32 +436,7 @@ async function sendWebhook(payload){
     });
   }catch(e){}
 }
-
-async function ensureAuditStore(){
-  return new Promise((resolve) => {
-    const req = indexedDB.open("clockDB");
-    req.onsuccess = function(){
-      const db = req.result;
-      if(!db.objectStoreNames.contains("audit")){
-        db.close();
-        const upgrade = indexedDB.open("clockDB", 6);
-        upgrade.onupgradeneeded = function(e){
-          const db2 = e.target.result;
-          if(!db2.objectStoreNames.contains("audit")){
-            db2.createObjectStore("audit", { keyPath: "id" });
-          }
-        };
-        upgrade.onsuccess = function(){ resolve(); };
-      } else {
-        resolve();
-      }
-    };
-  });
-}
-
-
 async function addAudit(entry){
-  await ensureAuditStore();
   const rec = {
     id: Date.now().toString() + "_" + Math.random().toString(16).slice(2),
     at: new Date().toISOString(),
