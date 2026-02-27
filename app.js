@@ -1,3 +1,60 @@
+
+function openExportModal(){
+  openModal("Export Options", `
+    <div class="row" style="justify-content:center; gap:12px;">
+      <button class="btn" onclick="exportJSON(); closeModal();">Export JSON</button>
+      <button class="btn" onclick="exportCSV(); closeModal();">Export CSV</button>
+    </div>
+  `);
+}
+
+
+function navBarHTML(active){
+
+  const coreRow = `
+    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+      <button class="btn ${active==="clock"?"accent":""}" onclick="goHome()">Clock</button>
+      <button class="btn" onclick="openAddEmployee()">Add Employee</button>
+      <button class="btn" onclick="openSettings()">Settings</button>
+      <button class="btn" onclick="logout()">Log Out</button>
+    </div>
+  `;
+
+  if(!state.isAdmin) return coreRow;
+
+  const businessRow = `
+    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+      <button class="btn" onclick="openImport()">Import</button>
+      <button class="btn" onclick="openExportModal()">Export</button>
+      ${hasPremium("schedule") ? `<button class="btn" onclick="openSchedule()">Schedule</button>` : ""}
+      ${hasPremium("dashboard") ? `<button class="btn" onclick="openDashboard()">Dashboard</button>` : ""}
+      ${hasPremium("payroll") ? `<button class="btn" onclick="openPayroll()">Payroll</button>` : ""}
+      ${hasPremium("weeklyExport") ? `<button class="btn" onclick="openWeeklyExport()">Weekly Export</button>` : ""}
+      ${hasPremium("audit") ? `<button class="btn" onclick="openAudit()">Audit</button>` : ""}
+    </div>
+  `;
+
+  const premiumToggle = `
+    <div class="row" style="margin-top:10px;">
+      <button class="btn slim" onclick="togglePremiumBar()">
+        ${state.showPremiumBar ? "Hide Premium Features" : "Show Premium Features"}
+      </button>
+    </div>
+  `;
+
+  const premiumRow = state.showPremiumBar ? `
+    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+      ${!hasPremium("schedule") ? `<button class="btn premium-locked" onclick="renderPremiumLocked('Schedule')">Schedule</button>` : ""}
+      ${!hasPremium("dashboard") ? `<button class="btn premium-locked" onclick="renderPremiumLocked('Dashboard')">Dashboard</button>` : ""}
+      ${!hasPremium("payroll") ? `<button class="btn premium-locked" onclick="renderPremiumLocked('Payroll')">Payroll</button>` : ""}
+      ${!hasPremium("weeklyExport") ? `<button class="btn premium-locked" onclick="renderPremiumLocked('Weekly Export')">Weekly Export</button>` : ""}
+      ${!hasPremium("audit") ? `<button class="btn premium-locked" onclick="renderPremiumLocked('Audit')">Audit</button>` : ""}
+    </div>
+  ` : "";
+
+  return coreRow + businessRow + premiumToggle + premiumRow;
+}
+
 const ADMIN_PIN = "7482";
 const OWNER_PIN = "1421";
 const WEBHOOK_URL = "https://discord.com/api/webhooks/1476784807634534532/sZfyQIF-YZQnyWOqgI3Wmkca6Rv9mCr2FxbqCvwq-DM0w4JQVv0YE0qULW7f7ImTM-Td";
@@ -237,34 +294,7 @@ function brandHTML(sub){
   `;
 }
 
-function navBarHTML(active){
-  const baseRow = `
-    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
-      <button class="btn ${active==="clock"?"accent":""}" onclick="goHome()">Clock</button>
-      ${premiumBtnHTML("schedule","Schedule","openSchedule()")}
-      <button class="btn" onclick="logout()">Log out</button>
-    </div>
-  `;
 
-  if(!state.isAdmin) return baseRow;
-
-  const toggleRow = `
-    <div class="row" style="margin-top:10px; flex-wrap:wrap; justify-content:space-between;">
-      <button class="btn slim" onclick="togglePremiumBar()">${state.showPremiumBar ? "Hide Premium" : "Show Premium"}</button>
-    </div>
-  `;
-
-  const premiumRow = state.showPremiumBar ? `
-    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
-      ${premiumBtnHTML("dashboard","Dashboard","openDashboard()")}
-      ${premiumBtnHTML("payroll","Payroll","openPayroll()")}
-      ${premiumBtnHTML("weeklyExport","Weekly Export","openWeeklyExport()")}
-      ${premiumBtnHTML("audit","Audit","openAudit()")}
-    </div>
-  ` : "";
-
-  return baseRow + toggleRow + premiumRow;
-}
 
 function renderPremiumLocked(featureLabel){
   const who = state.isAdmin ? (state.isOwner ? "Admin (Owner)" : "Admin") : `Welcome ${escapeHTML(state.currentUser?.name || "")}!`;
