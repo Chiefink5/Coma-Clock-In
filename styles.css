@@ -37,8 +37,9 @@ body{
 #app{
   max-width:980px;
   margin:0 auto;
-  padding:14px;
+  padding:calc(70px + env(safe-area-inset-top, 0px)) 14px 18px 14px;
 }
+
 
 .topbar{
   position:sticky;
@@ -362,8 +363,8 @@ details.emp > summary::-webkit-details-marker{ display:none; }
 }
 
 .grid2{
-  display:grid;
-  grid-template-columns: 1fr 1fr;
+  display:flex; 
+  flex-direction:column; 
   gap:10px;
 }
 
@@ -432,11 +433,8 @@ details.emp > summary::-webkit-details-marker{ display:none; }
 
 .form{width:min(520px,92vw);} .lbl{display:block;opacity:.85;font-weight:700;margin-bottom:6px;} .input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:#fff;outline:none;} .input:focus{border-color:rgba(124,92,255,.7);box-shadow:0 0 0 3px rgba(124,92,255,.18);} 
 
-.wrap{max-width:1200px;margin:0 auto;padding:calc(90px + env(safe-area-inset-top, 0px)) 16px 44px 16px;}
+.wrap{width:100%;}
 
 
 select.input{appearance:none;}
 
-/* polish-top-padding */
-.card.soft{padding:22px;}
-@media (min-width: 900px){.card.soft{padding:26px;}}
