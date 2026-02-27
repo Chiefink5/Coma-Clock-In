@@ -250,7 +250,7 @@ function brandHTML(sub){
 }
 
 function navBarHTML(active){
-  // Row 1: core controls (always visible)
+  // Row 1: core controls
   const coreRow = `
     <div class="row" style="margin-top:10px; flex-wrap:wrap;">
       <button class="btn ${active==="clock"?"accent":""}" onclick="goHome()">Clock</button>
@@ -262,7 +262,7 @@ function navBarHTML(active){
 
   if(!state.isAdmin) return coreRow;
 
-  // Row 2: business tools (shows only if unlocked)
+  // Row 2: business tools (premium tools appear here only when unlocked)
   const businessRow = `
     <div class="row" style="margin-top:10px; flex-wrap:wrap;">
       <button class="btn" onclick="triggerImport()">Import</button>
@@ -276,16 +276,7 @@ function navBarHTML(active){
     </div>
   `;
 
-  // Row 3: premium toggle
-  const premiumToggle = `
-    <div class="row" style="margin-top:10px;">
-      <button class="btn slim" onclick="togglePremiumBar()">
-        ${state.showPremiumBar ? "Hide Premium Tools" : "Show Premium Tools"}
-      </button>
-    </div>
-  `;
-
-  // Row 4: premium tools (only locked features appear here; glow gold)
+  // Premium buttons (locked only) - shown ONLY when toggled ON
   const premiumRow = state.showPremiumBar ? `
     <div class="row" style="margin-top:10px; flex-wrap:wrap;">
       ${!hasPremium("schedule") ? `<button class="btn premium-locked" onclick="renderPremiumLocked('Schedule')">Schedule</button>` : ""}
@@ -296,7 +287,16 @@ function navBarHTML(active){
     </div>
   ` : "";
 
-  return coreRow + businessRow + `<input id="importFile" type="file" style="display:none" onchange="importJSON(event)">` + premiumToggle + premiumRow;
+  // Row 3: toggle (ONLY button on this row, always last)
+  const premiumToggle = `
+    <div class="row" style="margin-top:10px; justify-content:center;">
+      <button class="btn slim" onclick="togglePremiumBar()">
+        ${state.showPremiumBar ? "Hide Premium Tools" : "Show Premium Tools"}
+      </button>
+    </div>
+  `;
+
+  return coreRow + businessRow + premiumRow + `<input id="importFile" type="file" style="display:none" onchange="importJSON(event)">` + premiumToggle;
 }
 
 function renderPremiumLocked(featureLabel){
@@ -1462,18 +1462,8 @@ async function renderAdmin(){
   setAppHTML(`
     ${brandHTML(state.isOwner ? "Admin (Owner)" : "Admin")}
     ${navBarHTML("clock")}
-    <div class="row">
-      <button class="btn accent" onclick="openSettingsModal()">Settings</button>
-      <button class="btn primary" onclick="openAddEmployeeModal()">Add Employee</button>
-      <button class="btn" onclick="exportCSV()">Export CSV</button>
-      <button class="btn" onclick="exportJSON()">Export JSON</button>
-      <button class="btn" onclick="triggerImport()">Import</button>
-      <input id="importFile" type="file" style="display:none" onchange="importJSON(event)">
-    </div>
-<div class="card soft" style="margin-top:10px;">
-  <div style="font-weight:800;">Premium Tools</div>
-  <div class="note" style="margin-top:6px;">Locked tools glow gold until enabled.</div>
-  <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+    
+<div class="row" style="margin-top:10px; flex-wrap:wrap;">
     ${premiumBtnHTML("dashboard","Dashboard","openDashboard()")}
     ${premiumBtnHTML("payroll","Payroll","openPayroll()")}
     ${premiumBtnHTML("weeklyExport","Weekly Export","openWeeklyExport()")}
