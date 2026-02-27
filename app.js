@@ -176,6 +176,121 @@ function logout(){
   renderLogin();
 }
 
+function triggerImport(){
+  pingActivity();
+  const f = qs("#importFile");
+  if(!f){
+    // If input isn't in DOM yet, re-render and try again next tick
+    if(state.isAdmin) renderAdmin();
+    setTimeout(()=>{ const ff = qs("#importFile"); if(ff) ff.click(); }, 50);
+    return;
+  }
+  f.value = "";
+  f.click();
+}
+
+function openSettingsModal(){
+  pingActivity();
+  const nameVal = escapeHTML(state.storeName || "Shop Clock");
+  const logoVal = escapeHTML(state.logo || "");
+  openModal("Settings", `
+    <div class="form">
+      <label class="lbl">Store name</label>
+      <input class="input" id="set_storeName" value="${nameVal}" placeholder="Shop Clock">
+      <label class="lbl" style="margin-top:12px;">Logo URL (optional)</label>
+      <input class="input" id="set_logo" value="${logoVal}" placeholder="https://...png">
+      <div class="row" style="margin-top:14px; justify-content:flex-end;">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn accent" onclick="saveSettingsFromModal()">Save</button>
+      </div>
+    </div>
+  `);
+}
+
+async function saveSettingsFromModal(){
+  try{
+    const storeName = qs("#set_storeName")?.value?.trim() || "Shop Clock";
+    const logo = qs("#set_logo")?.value?.trim() || "";
+    state.storeName = storeName;
+    state.logo = logo;
+    await saveSetting("storeName", storeName);
+    await saveSetting("logo", logo);
+    closeModal();
+    renderAdmin();
+  }catch(e){
+    closeModal();
+    renderAdmin();
+  }
+}
+
+function openAddEmployeeModal(){
+  pingActivity();
+  openModal("Add Employee", `
+    <div class="form">
+      <label class="lbl">Name</label>
+      <input class="input" id="emp_name" placeholder="Employee name">
+      <label class="lbl" style="margin-top:12px;">Employee ID</label>
+      <input class="input" id="emp_id" inputmode="numeric" placeholder="1">
+      <label class="lbl" style="margin-top:12px;">PIN</label>
+      <input class="input" id="emp_pin" inputmode="numeric" placeholder="4 digits">
+      <label class="lbl" style="margin-top:12px;">Hourly rate</label>
+      <input class="input" id="emp_rate" inputmode="decimal" placeholder="10.00">
+      <div class="row" style="margin-top:14px; justify-content:flex-end;">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn accent" onclick="createEmployeeFromModal()">Create</button>
+      </div>
+    </div>
+  `);
+}
+
+async function createEmployeeFromModal(){
+  const name = (qs("#emp_name")?.value || "").trim();
+  const idRaw = (qs("#emp_id")?.value || "").trim();
+  const pin = (qs("#emp_pin")?.value || "").trim();
+  const rateRaw = (qs("#emp_rate")?.value || "").trim();
+
+  if(!name || !idRaw || !pin){
+    openModal("Missing info", `<div class="note">Name, ID, and PIN are required.</div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end;">
+        <button class="btn accent" onclick="closeModal()">OK</button>
+      </div>`);
+    return;
+  }
+
+  const id = Number(idRaw);
+  const rate = Number(rateRaw || "0");
+  if(!Number.isFinite(id) || id <= 0){
+    openModal("Invalid ID", `<div class="note">Employee ID must be a positive number.</div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end;">
+        <button class="btn accent" onclick="closeModal()">OK</button>
+      </div>`);
+    return;
+  }
+
+  // prevent duplicate ID or PIN
+  const employees = await getAll("employees");
+  if(employees.some(e => Number(e.id) === id)){
+    openModal("Duplicate ID", `<div class="note">That employee ID already exists.</div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end;">
+        <button class="btn accent" onclick="closeModal()">OK</button>
+      </div>`);
+    return;
+  }
+  if(employees.some(e => String(e.pin) === String(pin))){
+    openModal("Duplicate PIN", `<div class="note">That PIN is already assigned to another employee.</div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end;">
+        <button class="btn accent" onclick="closeModal()">OK</button>
+      </div>`);
+    return;
+  }
+
+  const emp = { id, name, pin, rate: Number.isFinite(rate) ? rate : 0, active:true };
+  await save("employees", emp);
+
+  closeModal();
+  renderAdmin();
+}
+
 function pingActivity(){
   bumpAutoLogout();
 }
