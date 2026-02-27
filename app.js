@@ -38,7 +38,7 @@ function qs(sel){ return document.querySelector(sel); }
 
 function initDB(){
   return new Promise((res)=>{
-    const request = indexedDB.open("clockDB", 4);
+    const request = indexedDB.open("clockDB", 6);
     request.onupgradeneeded = (e)=>{
       db = e.target.result;
       if(!db.objectStoreNames.contains("employees")) db.createObjectStore("employees", { keyPath:"id" });
@@ -238,17 +238,32 @@ function brandHTML(sub){
 }
 
 function navBarHTML(active){
-  const isEmp = !!state.currentUser && !state.isAdmin;
-  return `
-    <div class="row" style="margin-top:12px;">
-      ${isEmp
-        ? `<button class="btn ${active==="clock"?"accent":""}" onclick="renderEmployee()">Clock</button>`
-        : `<button class="btn ${active==="clock"?"accent":""}" onclick="renderAdmin()">Clock</button>`
-      }
+  const baseRow = `
+    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+      <button class="btn ${active==="clock"?"accent":""}" onclick="goHome()">Clock</button>
       ${premiumBtnHTML("schedule","Schedule","openSchedule()")}
-      <button class="btn" onclick="renderLogin()">Log Out</button>
+      <button class="btn" onclick="logout()">Log out</button>
     </div>
   `;
+
+  if(!state.isAdmin) return baseRow;
+
+  const toggleRow = `
+    <div class="row" style="margin-top:10px; flex-wrap:wrap; justify-content:space-between;">
+      <button class="btn slim" onclick="togglePremiumBar()">${state.showPremiumBar ? "Hide Premium" : "Show Premium"}</button>
+    </div>
+  `;
+
+  const premiumRow = state.showPremiumBar ? `
+    <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+      ${premiumBtnHTML("dashboard","Dashboard","openDashboard()")}
+      ${premiumBtnHTML("payroll","Payroll","openPayroll()")}
+      ${premiumBtnHTML("weeklyExport","Weekly Export","openWeeklyExport()")}
+      ${premiumBtnHTML("audit","Audit","openAudit()")}
+    </div>
+  ` : "";
+
+  return baseRow + toggleRow + premiumRow;
 }
 
 function renderPremiumLocked(featureLabel){
@@ -271,6 +286,7 @@ function renderPremiumLocked(featureLabel){
 }
 
 function hasPremium(featureKey){
+  if(state.isOwner) return true;
   return !!(state.premiumFlags && state.premiumFlags[featureKey] === true);
 }
 
@@ -395,11 +411,18 @@ async function devSaveFlags(){
 function togglePremiumBar(){
   pingActivity();
   state.showPremiumBar = !state.showPremiumBar;
+  // Re-render current view without relying on tab switching
   if(state.isAdmin){
-    renderAdmin();
-  }else{
-    renderEmployee();
+    // try to keep user in the same admin section if possible
+    const current = state.currentView || "admin";
+    if(current === "dashboard") return renderDashboard();
+    if(current === "payroll") return renderPayroll();
+    if(current === "weeklyExport") return renderWeeklyExport();
+    if(current === "audit") return renderAudit();
+    if(current === "schedule") return openSchedule();
+    return renderAdmin();
   }
+  return renderEmployee();
 }
 
 
@@ -413,7 +436,32 @@ async function sendWebhook(payload){
     });
   }catch(e){}
 }
+
+async function ensureAuditStore(){
+  return new Promise((resolve) => {
+    const req = indexedDB.open("clockDB");
+    req.onsuccess = function(){
+      const db = req.result;
+      if(!db.objectStoreNames.contains("audit")){
+        db.close();
+        const upgrade = indexedDB.open("clockDB", 6);
+        upgrade.onupgradeneeded = function(e){
+          const db2 = e.target.result;
+          if(!db2.objectStoreNames.contains("audit")){
+            db2.createObjectStore("audit", { keyPath: "id" });
+          }
+        };
+        upgrade.onsuccess = function(){ resolve(); };
+      } else {
+        resolve();
+      }
+    };
+  });
+}
+
+
 async function addAudit(entry){
+  await ensureAuditStore();
   const rec = {
     id: Date.now().toString() + "_" + Math.random().toString(16).slice(2),
     at: new Date().toISOString(),
@@ -617,6 +665,8 @@ async function openOvertimeModal(employeeId){
 
 async function renderEmployee(){
   pingActivity();
+  state.currentView = "employee";
+  state.currentView = "employee";
   await autoCloseAt1130();
   await loadSettings();
 
@@ -1220,6 +1270,8 @@ async function scheduleDayChanged(dayIndex){
 
 async function renderScheduleAdminBuilder(){
   pingActivity();
+  state.currentView = "schedule";
+  state.currentView = "schedule";
   await loadSettings();
 
   if(!schedState.weekKey) schedState.weekKey = weekKeyFromDate(new Date());
@@ -1319,6 +1371,8 @@ async function renderScheduleAdminBuilder(){
 
 async function renderScheduleEmployee(){
   pingActivity();
+  state.currentView = "schedule";
+  state.currentView = "schedule";
   await loadSettings();
 
   const me = state.currentUser;
@@ -1359,6 +1413,8 @@ async function renderScheduleEmployee(){
 
 async function renderAdmin(){
   pingActivity();
+  state.currentView = "admin";
+  state.currentView = "admin";
   await autoCloseAt1130();
   await loadSettings();
 
@@ -1478,8 +1534,8 @@ async function renderAdmin(){
       const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
       const buttonsHTML = lockedShift ? `<span class="badge gold">Locked</span>` : `
           <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
-            <button class="btn slim" onclick="editShift('${escapeHTML(s.shiftId)}')">Edit</button>
-            <button class="btn slim danger" onclick="deleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
+            <button class="btn slim" onclick="editShift('${s.shiftId}')">Edit</button>
+            <button class="btn slim danger" onclick="deleteShift('${s.shiftId}')">Delete</button>
           </div>`;
 
       const row = document.createElement("div");
@@ -1543,6 +1599,8 @@ async function computeWeekStats(weekKey){
 
 async function renderDashboard(){
   pingActivity();
+  state.currentView = "dashboard";
+  state.currentView = "dashboard";
   await loadSettings();
 
   const weekKey = weekKeyFromDate(new Date());
@@ -1591,6 +1649,8 @@ function payrollThisWeek(){ payrollWeekKey = weekKeyFromDate(new Date()); render
 
 async function renderPayroll(){
   pingActivity();
+  state.currentView = "payroll";
+  state.currentView = "payroll";
   await loadSettings();
 
   if(!payrollWeekKey) payrollWeekKey = weekKeyFromDate(new Date());
@@ -1673,6 +1733,8 @@ async function downloadWeeklySummaryCSV(weekKey){
 
 async function renderWeeklyExport(){
   pingActivity();
+  state.currentView = "weeklyExport";
+  state.currentView = "weeklyExport";
   await loadSettings();
 
   if(!exportWeekKey) exportWeekKey = weekKeyFromDate(new Date());
@@ -1740,6 +1802,8 @@ function auditThisWeek(){ auditWeekKey = weekKeyFromDate(new Date()); renderAudi
 
 async function renderAudit(){
   pingActivity();
+  state.currentView = "audit";
+  state.currentView = "audit";
   await loadSettings();
 
   if(!auditWeekKey) auditWeekKey = weekKeyFromDate(new Date());
