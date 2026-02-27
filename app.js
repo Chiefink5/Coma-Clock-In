@@ -244,7 +244,7 @@ function navBarHTML(active){
         ? `<button class="btn ${active==="clock"?"accent":""}" onclick="renderEmployee()">Clock</button>`
         : `<button class="btn ${active==="clock"?"accent":""}" onclick="renderAdmin()">Clock</button>`
       }
-      <button class="btn ${active==="schedule"?"accent":""}" onclick="openSchedule()">Schedule</button>
+      ${premiumBtnHTML("schedule","Schedule","openSchedule()")}
       <button class="btn" onclick="renderLogin()">Log Out</button>
     </div>
   `;
@@ -272,6 +272,15 @@ function renderPremiumLocked(featureLabel){
 function hasPremium(featureKey){
   return !!(state.premiumFlags && state.premiumFlags[featureKey] === true);
 }
+
+
+function premiumBtnHTML(featureKey, label, onClick){
+  const enabled = hasPremium(featureKey);
+  const cls = enabled ? "btn" : "btn premium-locked";
+  const handler = enabled ? onClick : `renderPremiumLocked("${label}")`;
+  return `<button class="${cls}" onclick='${handler}'>${escapeHTML(label)}</button>`;
+}
+
 
 function openSchedule(){
   pingActivity();
@@ -1356,11 +1365,15 @@ async function renderAdmin(){
       <button class="btn" onclick="triggerImport()">Import</button>
       <input id="importFile" type="file" style="display:none" onchange="importJSON(event)">
     </div>
-<div class="row" style="margin-top:10px;">
-  <button class="btn" onclick="openDashboard()">Dashboard</button>
-  <button class="btn" onclick="openPayroll()">Payroll</button>
-  <button class="btn" onclick="openWeeklyExport()">Weekly Export</button>
-  <button class="btn" onclick="openAudit()">Audit</button>
+<div class="card soft" style="margin-top:10px;">
+  <div style="font-weight:800;">Premium Tools</div>
+  <div class="note" style="margin-top:6px;">Locked tools glow gold until enabled.</div>
+  <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+    ${premiumBtnHTML("dashboard","Dashboard","openDashboard()")}
+    ${premiumBtnHTML("payroll","Payroll","openPayroll()")}
+    ${premiumBtnHTML("weeklyExport","Weekly Export","openWeeklyExport()")}
+    ${premiumBtnHTML("audit","Audit","openAudit()")}
+  </div>
 </div>
 
     <div class="hr"></div>
@@ -1448,6 +1461,11 @@ async function renderAdmin(){
       const outT = s.out ? formatTime(new Date(s.out)) : "--";
       const dur = s.out ? hoursBetween(s.in, s.out) : 0;
       const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
+      const buttonsHTML = lockedShift ? `<span class="badge gold">Locked</span>` : `
+          <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+            <button class="btn slim" onclick="editShift('${escapeHTML(s.shiftId)}')">Edit</button>
+            <button class="btn slim danger" onclick="deleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
+          </div>`;
 
       const row = document.createElement("div");
       row.className = "shiftRow";
@@ -1459,11 +1477,7 @@ async function renderAdmin(){
         </div>
         <div class="right">
           ${s.out ? `<div><strong>${dur.toFixed(2)}</strong> hrs</div>` : `<div><strong>Open</strong></div>`}
-          ${lockedShift ? `<span class="badge glow">Locked</span>` : `
-          <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
-            <button class="btn slim" onclick="editShift('${escapeHTML(s.shiftId)}')">Edit</button>
-            <button class="btn slim danger" onclick="deleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
-          </div>`}
+          ${buttonsHTML}
         </div>
       `;
       recentList.appendChild(row);

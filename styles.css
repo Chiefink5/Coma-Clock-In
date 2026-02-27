@@ -420,3 +420,10 @@ details.emp > summary::-webkit-details-marker{ display:none; }
   font-size:13px;
   margin-top:8px;
 }
+
+
+/* Premium locked button state */
+.premium-locked{border-color: rgba(255,215,0,.55) !important; box-shadow: 0 0 18px rgba(255,215,0,.35) !important; background: rgba(255,215,0,.08) !important; color: rgba(255,245,200,.95) !important;}
+.premium-locked:hover{filter: brightness(1.08);}
+
+.badge.gold{border-color: rgba(255,215,0,.55) !important; box-shadow: 0 0 18px rgba(255,215,0,.30) !important;}
