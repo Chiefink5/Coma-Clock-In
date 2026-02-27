@@ -6,7 +6,7 @@ let state = {
   currentUser: null,
   isAdmin: false,
   isOwner: false,
-  storeName: "Coma Smoke Shop",
+  storeName: "Coma Smoke Shop | Time Clock",
   logo: ""
 };
 
@@ -15,7 +15,6 @@ let logoutTimer = null;
 let modalEl = null;
 
 function qs(sel){ return document.querySelector(sel); }
-function qsa(sel){ return [...document.querySelectorAll(sel)]; }
 
 function initDB(){
   return new Promise((res)=>{
@@ -124,7 +123,7 @@ function setAppHTML(html){
   document.body.onkeydown = ()=>pingActivity();
 }
 
-function openModal(title, bodyHTML, onMount){
+function openModal(title, bodyHTML){
   closeModal();
   modalEl = document.createElement("div");
   modalEl.className = "modalOverlay";
@@ -142,7 +141,6 @@ function openModal(title, bodyHTML, onMount){
   modalEl.addEventListener("click", (e)=>{
     if(e.target === modalEl) closeModal();
   });
-  if(typeof onMount === "function") onMount();
 }
 
 function closeModal(){
@@ -166,72 +164,78 @@ function brandHTML(sub){
   `;
 }
 
-function renderLogin(){
-  clearLogoutTimer();
-  setAppHTML(`
-    ${brandHTML("Enter your PIN")}
-    <div class="pinwrap">
-      <div class="pinDisplay" id="pinDisplay"></div>
-      <div class="pinpad" id="pinpad"></div>
-    </div>
-  `);
-
-  const pad = qs("#pinpad");
-  const display = qs("#pinDisplay");
-  let pin = "";
-
-  const keys = [1,2,3,4,5,6,7,8,9,"C",0,"OK"];
-
-  keys.forEach((k)=>{
-    const b = document.createElement("button");
-    b.className = "pinbtn";
-    if(k==="OK") b.classList.add("ok");
-    if(k==="C") b.classList.add("clear");
-    b.textContent = k;
-    b.onclick = async ()=>{
-      pingActivity();
-      if(k==="C"){ pin=""; }
-      else if(k==="OK"){
-        await handleLogin(pin);
-        pin="";
-      } else {
-        pin += String(k);
-      }
-      display.textContent = pin ? "•".repeat(pin.length) : "";
-    };
-    pad.appendChild(b);
-  });
+function escapeHTML(str){
+  return String(str || "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
 }
 
-async function handleLogin(pin){
-  await loadSettings();
+/* ---------- Webhook human formatting ---------- */
 
-  if(pin === ADMIN_PIN){
-    state.currentUser = "admin";
-    state.isAdmin = true;
-    state.isOwner = false;
-    renderAdmin();
-    return;
-  }
-
-  if(pin === OWNER_PIN){
-    state.currentUser = "owner";
-    state.isAdmin = true;
-    state.isOwner = true;
-    renderAdmin();
-    return;
-  }
-
-  const employees = await getAll("employees");
-  const user = employees.find(e => e.pin === pin && e.active !== false);
-
-  if(user){
-    state.currentUser = user;
-    state.isAdmin = false;
-    state.isOwner = false;
-    renderEmployee();
-  }
+function fmtDateLocal(iso){
+  if(!iso) return "--";
+  const d = new Date(iso);
+  const mm = String(d.getMonth()+1).padStart(2,"0");
+  const dd = String(d.getDate()).padStart(2,"0");
+  const yyyy = d.getFullYear();
+  return `${mm}/${dd}/${yyyy}`;
 }
+
+function fmtTimeLocal12(iso){
+  if(!iso) return "--";
+  const d = new Date(iso);
+  let h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2,"0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if(h === 0) h = 12;
+  return `${h}:${m} ${ampm}`;
+}
+
+function plural(n, word){
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function fmtHoursDeltaWords(deltaHours){
+  const v = Number(deltaHours || 0);
+  const sign = v > 0 ? "+" : v < 0 ? "-" : "";
+  const absMinutes = Math.round(Math.abs(v) * 60);
+
+  const hrs = Math.floor(absMinutes / 60);
+  const mins = absMinutes % 60;
+
+  if(absMinutes === 0) return "0 minutes";
+
+  if(hrs > 0 && mins > 0){
+    return `${sign}${plural(hrs, "hour")} ${plural(mins, "minute")}`;
+  }
+  if(hrs > 0){
+    return `${sign}${plural(hrs, "hour")}`;
+  }
+  return `${sign}${plural(mins, "minute")}`;
+}
+
+async function employeeLabel(employeeId){
+  const emp = await get("employees", employeeId);
+  if(!emp) return { name: "Unknown", id: String(employeeId || "") };
+  return { name: String(emp.name || "Unknown"), id: String(emp.id || employeeId || "") };
+}
+
+async function sendWebhook(payload){
+  if(!WEBHOOK_URL || WEBHOOK_URL.includes("PUT_DISCORD_WEBHOOK_URL_HERE")) return;
+  try{
+    await fetch(WEBHOOK_URL, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify(payload)
+    });
+  }catch(e){}
+}
+
+/* ---------- Core shift logic ---------- */
 
 async function findOpenShift(employeeId){
   const shifts = await getAll("shifts");
@@ -303,13 +307,73 @@ async function getCurrentWeekTotalsForEmployee(employee){
   return { totalHours, pay };
 }
 
-function escapeHTML(str){
-  return String(str || "")
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
+/* ---------- Login / Views ---------- */
+
+function renderLogin(){
+  clearLogoutTimer();
+  setAppHTML(`
+    ${brandHTML("Enter your PIN")}
+    <div class="pinwrap">
+      <div class="pinDisplay" id="pinDisplay"></div>
+      <div class="pinpad" id="pinpad"></div>
+    </div>
+  `);
+
+  const pad = qs("#pinpad");
+  const display = qs("#pinDisplay");
+  let pin = "";
+
+  const keys = [1,2,3,4,5,6,7,8,9,"C",0,"OK"];
+
+  keys.forEach((k)=>{
+    const b = document.createElement("button");
+    b.className = "pinbtn";
+    if(k==="OK") b.classList.add("ok");
+    if(k==="C") b.classList.add("clear");
+    b.textContent = k;
+    b.onclick = async ()=>{
+      pingActivity();
+      if(k==="C"){ pin=""; }
+      else if(k==="OK"){
+        await handleLogin(pin);
+        pin="";
+      } else {
+        pin += String(k);
+      }
+      display.textContent = pin ? "•".repeat(pin.length) : "";
+    };
+    pad.appendChild(b);
+  });
+}
+
+async function handleLogin(pin){
+  await loadSettings();
+
+  if(pin === ADMIN_PIN){
+    state.currentUser = "admin";
+    state.isAdmin = true;
+    state.isOwner = false;
+    renderAdmin();
+    return;
+  }
+
+  if(pin === OWNER_PIN){
+    state.currentUser = "owner";
+    state.isAdmin = true;
+    state.isOwner = true;
+    renderAdmin();
+    return;
+  }
+
+  const employees = await getAll("employees");
+  const user = employees.find(e => e.pin === pin && e.active !== false);
+
+  if(user){
+    state.currentUser = user;
+    state.isAdmin = false;
+    state.isOwner = false;
+    renderEmployee();
+  }
 }
 
 async function renderEmployee(){
@@ -372,6 +436,8 @@ async function renderEmployee(){
   });
 }
 
+/* ---------- Admin tools ---------- */
+
 async function openAddEmployeeModal(){
   pingActivity();
   openModal("Add Employee", `
@@ -427,7 +493,6 @@ async function openSettingsModal(){
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn accent" onclick="saveSettingsFromModal()">Save</button>
     </div>
-    <div class="note">Logo URL should be a direct image link.</div>
   `);
 }
 
@@ -445,17 +510,6 @@ async function saveSettingsFromModal(){
 
   closeModal();
   renderAdmin();
-}
-
-async function sendWebhook(payload){
-  if(!WEBHOOK_URL || WEBHOOK_URL.includes("PUT_DISCORD_WEBHOOK_URL_HERE")) return;
-  try{
-    await fetch(WEBHOOK_URL, {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify(payload)
-    });
-  }catch(e){}
 }
 
 async function setEmployeeRate(id){
@@ -596,16 +650,23 @@ async function saveShiftEdit(shiftId, beforeIn, beforeOut){
 
   await save("shifts", shift);
 
+  const beforeHours = beforeOut ? hoursBetween(beforeIn, beforeOut) : 0;
+  const afterHours = shift.out ? hoursBetween(shift.in, shift.out) : 0;
+  const diffHours = afterHours - beforeHours;
+
+  const empInfo = await employeeLabel(shift.employeeId);
+  const dateStr = fmtDateLocal(shift.in);
+
   await sendWebhook({
-    content: `Shift edited`,
+    content: `Shift Edited`,
     embeds: [{
-      title:"Shift Edited",
-      fields:[
-        { name:"Shift ID", value:String(shiftId) },
-        { name:"Before In", value:String(beforeIn||"") },
-        { name:"Before Out", value:String(beforeOut||"") },
-        { name:"After In", value:String(shift.in||"") },
-        { name:"After Out", value:String(shift.out||"") }
+      title: "Shift Edited",
+      fields: [
+        { name: "Employee", value: `> ${empInfo.name} (${empInfo.id})`, inline: false },
+        { name: "Date", value: `${dateStr}`, inline: true },
+        { name: "Before", value: `> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${fmtTimeLocal12(beforeOut)}`, inline: false },
+        { name: "After", value: `> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}`, inline: false },
+        { name: "Hours Difference", value: `> ${fmtHoursDeltaWords(diffHours)}`, inline: false }
       ]
     }]
   });
@@ -616,9 +677,6 @@ async function saveShiftEdit(shiftId, beforeIn, beforeOut){
 
 async function deleteShift(shiftId){
   pingActivity();
-  const shift = await get("shifts", shiftId);
-  if(!shift) return;
-
   openModal("Delete Shift", `
     <div class="note">This will remove the shift permanently.</div>
     <div class="row" style="justify-content:flex-end;margin-top:12px;">
@@ -635,15 +693,18 @@ async function confirmDeleteShift(shiftId){
 
   await del("shifts", shiftId);
 
+  const empInfo = await employeeLabel(shift.employeeId);
+  const dateStr = fmtDateLocal(shift.in);
+  const dur = shift.out ? hoursBetween(shift.in, shift.out) : 0;
+
   await sendWebhook({
-    content:`Shift deleted`,
-    embeds:[{
-      title:"Shift Deleted",
-      fields:[
-        { name:"Shift ID", value:String(shiftId) },
-        { name:"Employee ID", value:String(shift.employeeId||"") },
-        { name:"In", value:String(shift.in||"") },
-        { name:"Out", value:String(shift.out||"") }
+    content: `Shift Deleted`,
+    embeds: [{
+      title: "Shift Deleted",
+      fields: [
+        { name: "Employee", value: `> ${empInfo.name} (${empInfo.id})`, inline: false },
+        { name: "Date", value: `${dateStr}`, inline: true },
+        { name: "Shift", value: `> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${fmtTimeLocal12(shift.out)}\n> Length: ${dur.toFixed(2)} hrs`, inline: false }
       ]
     }]
   });
@@ -714,58 +775,6 @@ function importJSON(e){
   e.target.value = "";
 }
 
-async function requestPersistentStorage(){
-  try{
-    if(navigator.storage && navigator.storage.persist){
-      await navigator.storage.persist();
-    }
-  }catch(e){}
-}
-
-function computeOvertime(totalHours){
-  const otHours = Math.max(0, totalHours - 40);
-  return otHours;
-}
-
-async function openOvertimeModal(employeeId){
-  if(!state.isOwner) return;
-
-  const emp = await get("employees", employeeId);
-  if(!emp) return;
-
-  const shifts = await getAll("shifts");
-  const wk = weekKeyFromDate(new Date());
-
-  let totalHours = 0;
-  shifts
-    .filter(s => s.employeeId === emp.id && s.out)
-    .forEach(s=>{
-      if(weekKeyFromDate(new Date(s.in)) === wk){
-        totalHours += hoursBetween(s.in, s.out);
-      }
-    });
-
-  const otHours = computeOvertime(totalHours);
-  const rate = Number(emp.rate || 0);
-  const otValue = otHours * rate * 0.5;
-
-  openModal(`${escapeHTML(emp.name)}`, `
-    <div class="card soft" style="margin-top:0;">
-      <div class="kpi" style="justify-content:flex-start;">
-        <div class="pill"><strong>Total (wk)</strong>&nbsp;&nbsp;${totalHours.toFixed(2)} hrs</div>
-        <div class="pill"><strong>OT (wk)</strong>&nbsp;&nbsp;${otHours.toFixed(2)} hrs</div>
-        <div class="pill"><strong>OT $</strong>&nbsp;&nbsp;$${otValue.toFixed(2)}</div>
-      </div>
-      <div class="note" style="margin-top:10px;">
-        Week starts Monday. OT is hours over 40 for the current week only.
-      </div>
-    </div>
-    <div class="row" style="justify-content:flex-end;margin-top:12px;">
-      <button class="btn" onclick="closeModal()">Close</button>
-    </div>
-  `);
-}
-
 async function renderAdmin(){
   pingActivity();
   await autoCloseAt1130();
@@ -824,11 +833,6 @@ async function renderAdmin(){
 
     const details = document.createElement("details");
     details.className = "emp";
-
-    const hoursTap = state.isOwner
-      ? `onclick="event.preventDefault(); event.stopPropagation(); openOvertimeModal('${escapeHTML(e.id)}')"`
-      : ``;
-
     details.innerHTML = `
       <summary>
         <div class="empHead">
@@ -837,9 +841,7 @@ async function renderAdmin(){
         </div>
         <div class="empTail">
           <div style="text-align:right;">
-            <div ${hoursTap} style="${state.isOwner ? "cursor:pointer;" : ""}">
-              <strong>${totalWeek.toFixed(2)}</strong> hrs
-            </div>
+            <div><strong>${totalWeek.toFixed(2)}</strong> hrs</div>
             <div style="opacity:.7;">All: ${totalAll.toFixed(2)} hrs</div>
           </div>
         </div>
@@ -896,6 +898,14 @@ async function renderAdmin(){
       recentList.appendChild(row);
     }
   }
+}
+
+async function requestPersistentStorage(){
+  try{
+    if(navigator.storage && navigator.storage.persist){
+      await navigator.storage.persist();
+    }
+  }catch(e){}
 }
 
 initDB().then(async ()=>{
