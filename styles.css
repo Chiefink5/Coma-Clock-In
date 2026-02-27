@@ -13,7 +13,17 @@
 }
 
 *{ box-sizing:border-box; }
-html,body{ height:100%; }
+
+html, body {
+  height:100%;
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+}
+
+button, input, select, textarea, summary {
+  touch-action: manipulation;
+}
+
 body{
   margin:0;
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;

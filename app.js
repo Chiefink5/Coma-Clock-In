@@ -1,12 +1,12 @@
 const ADMIN_PIN = "9999";
 const OWNER_PIN = "1421";
-const WEBHOOK_URL = "https://discord.com/api/webhooks/1476784807634534532/sZfyQIF-YZQnyWOqgI3Wmkca6Rv9mCr2FxbqCvwq-DM0w4JQVv0YE0qULW7f7ImTM-Td";
+const WEBHOOK_URL = "PUT_DISCORD_WEBHOOK_URL_HERE";
 
 let state = {
   currentUser: null,
   isAdmin: false,
   isOwner: false,
-  storeName: "Coma Smoke Shop | Time Clock",
+  storeName: "Shop Clock",
   logo: ""
 };
 
@@ -14,16 +14,20 @@ let db;
 let logoutTimer = null;
 let modalEl = null;
 
+const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let schedState = { weekKey: null, selected: null };
+
 function qs(sel){ return document.querySelector(sel); }
 
 function initDB(){
   return new Promise((res)=>{
-    const request = indexedDB.open("clockDB", 1);
+    const request = indexedDB.open("clockDB", 2);
     request.onupgradeneeded = (e)=>{
       db = e.target.result;
       if(!db.objectStoreNames.contains("employees")) db.createObjectStore("employees", { keyPath:"id" });
       if(!db.objectStoreNames.contains("shifts")) db.createObjectStore("shifts", { keyPath:"shiftId" });
       if(!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath:"key" });
+      if(!db.objectStoreNames.contains("schedule")) db.createObjectStore("schedule", { keyPath:"id" });
     };
     request.onsuccess = (e)=>{ db = e.target.result; res(); };
   });
@@ -59,6 +63,15 @@ function getAll(store){
     const req = tx.objectStore(store).getAll();
     req.onsuccess = ()=>res(req.result || []);
   });
+}
+
+function escapeHTML(str){
+  return String(str || "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
 }
 
 function formatTime(d){
@@ -138,16 +151,11 @@ function openModal(title, bodyHTML){
   `;
   document.body.appendChild(modalEl);
   qs("#modalCloseBtn").onclick = ()=>closeModal();
-  modalEl.addEventListener("click", (e)=>{
-    if(e.target === modalEl) closeModal();
-  });
+  modalEl.addEventListener("click", (e)=>{ if(e.target === modalEl) closeModal(); });
 }
 
 function closeModal(){
-  if(modalEl){
-    modalEl.remove();
-    modalEl = null;
-  }
+  if(modalEl){ modalEl.remove(); modalEl = null; }
 }
 
 function brandHTML(sub){
@@ -164,16 +172,19 @@ function brandHTML(sub){
   `;
 }
 
-function escapeHTML(str){
-  return String(str || "")
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
+function navBarHTML(active){
+  const isEmp = !!state.currentUser && !state.isAdmin;
+  return `
+    <div class="row" style="margin-top:12px;">
+      ${isEmp
+        ? `<button class="btn ${active==="clock"?"accent":""}" onclick="renderEmployee()">Clock</button>`
+        : `<button class="btn ${active==="clock"?"accent":""}" onclick="renderAdmin()">Clock</button>`
+      }
+      <button class="btn ${active==="schedule"?"accent":""}" onclick="${isEmp ? "renderScheduleEmployee()" : "renderScheduleAdmin()"}">Schedule</button>
+      <button class="btn" onclick="renderLogin()">Log Out</button>
+    </div>
+  `;
 }
-
-/* ---------- Webhook human formatting ---------- */
 
 function fmtDateLocal(iso){
   if(!iso) return "--";
@@ -203,18 +214,11 @@ function fmtHoursDeltaWords(deltaHours){
   const v = Number(deltaHours || 0);
   const sign = v > 0 ? "+" : v < 0 ? "-" : "";
   const absMinutes = Math.round(Math.abs(v) * 60);
-
   const hrs = Math.floor(absMinutes / 60);
   const mins = absMinutes % 60;
-
   if(absMinutes === 0) return "0 minutes";
-
-  if(hrs > 0 && mins > 0){
-    return `${sign}${plural(hrs, "hour")} ${plural(mins, "minute")}`;
-  }
-  if(hrs > 0){
-    return `${sign}${plural(hrs, "hour")}`;
-  }
+  if(hrs > 0 && mins > 0) return `${sign}${plural(hrs, "hour")} ${plural(mins, "minute")}`;
+  if(hrs > 0) return `${sign}${plural(hrs, "hour")}`;
   return `${sign}${plural(mins, "minute")}`;
 }
 
@@ -235,7 +239,75 @@ async function sendWebhook(payload){
   }catch(e){}
 }
 
-/* ---------- Core shift logic ---------- */
+async function requestPersistentStorage(){
+  try{
+    if(navigator.storage && navigator.storage.persist){
+      await navigator.storage.persist();
+    }
+  }catch(e){}
+}
+
+function renderLogin(){
+  clearLogoutTimer();
+  setAppHTML(`
+    ${brandHTML("Enter your PIN")}
+    <div class="pinwrap">
+      <div class="pinDisplay" id="pinDisplay"></div>
+      <div class="pinpad" id="pinpad"></div>
+    </div>
+  `);
+
+  const pad = qs("#pinpad");
+  const display = qs("#pinDisplay");
+  let pin = "";
+  const keys = [1,2,3,4,5,6,7,8,9,"C",0,"OK"];
+
+  keys.forEach((k)=>{
+    const b = document.createElement("button");
+    b.className = "pinbtn";
+    if(k==="OK") b.classList.add("ok");
+    if(k==="C") b.classList.add("clear");
+    b.textContent = k;
+    b.onclick = async ()=>{
+      pingActivity();
+      if(k==="C"){ pin=""; }
+      else if(k==="OK"){ await handleLogin(pin); pin=""; }
+      else { pin += String(k); }
+      display.textContent = pin ? "•".repeat(pin.length) : "";
+    };
+    pad.appendChild(b);
+  });
+}
+
+async function handleLogin(pin){
+  await loadSettings();
+
+  if(pin === ADMIN_PIN){
+    state.currentUser = "admin";
+    state.isAdmin = true;
+    state.isOwner = false;
+    renderAdmin();
+    return;
+  }
+
+  if(pin === OWNER_PIN){
+    state.currentUser = "owner";
+    state.isAdmin = true;
+    state.isOwner = true;
+    renderAdmin();
+    return;
+  }
+
+  const employees = await getAll("employees");
+  const user = employees.find(e => e.pin === pin && e.active !== false);
+
+  if(user){
+    state.currentUser = user;
+    state.isAdmin = false;
+    state.isOwner = false;
+    renderEmployee();
+  }
+}
 
 async function findOpenShift(employeeId){
   const shifts = await getAll("shifts");
@@ -252,7 +324,6 @@ function hoursBetween(inISO, outISO){
 async function autoCloseAt1130(){
   const now = new Date();
   if(now.getHours() !== 23 || now.getMinutes() !== 30) return;
-
   const shifts = await getAll("shifts");
   const open = shifts.filter(s => !s.out);
   for(const s of open){
@@ -307,73 +378,44 @@ async function getCurrentWeekTotalsForEmployee(employee){
   return { totalHours, pay };
 }
 
-/* ---------- Login / Views ---------- */
-
-function renderLogin(){
-  clearLogoutTimer();
-  setAppHTML(`
-    ${brandHTML("Enter your PIN")}
-    <div class="pinwrap">
-      <div class="pinDisplay" id="pinDisplay"></div>
-      <div class="pinpad" id="pinpad"></div>
-    </div>
-  `);
-
-  const pad = qs("#pinpad");
-  const display = qs("#pinDisplay");
-  let pin = "";
-
-  const keys = [1,2,3,4,5,6,7,8,9,"C",0,"OK"];
-
-  keys.forEach((k)=>{
-    const b = document.createElement("button");
-    b.className = "pinbtn";
-    if(k==="OK") b.classList.add("ok");
-    if(k==="C") b.classList.add("clear");
-    b.textContent = k;
-    b.onclick = async ()=>{
-      pingActivity();
-      if(k==="C"){ pin=""; }
-      else if(k==="OK"){
-        await handleLogin(pin);
-        pin="";
-      } else {
-        pin += String(k);
-      }
-      display.textContent = pin ? "•".repeat(pin.length) : "";
-    };
-    pad.appendChild(b);
-  });
+function computeOvertime(totalHours){
+  return Math.max(0, totalHours - 40);
 }
 
-async function handleLogin(pin){
-  await loadSettings();
+async function openOvertimeModal(employeeId){
+  if(!state.isOwner) return;
 
-  if(pin === ADMIN_PIN){
-    state.currentUser = "admin";
-    state.isAdmin = true;
-    state.isOwner = false;
-    renderAdmin();
-    return;
-  }
+  const emp = await get("employees", employeeId);
+  if(!emp) return;
 
-  if(pin === OWNER_PIN){
-    state.currentUser = "owner";
-    state.isAdmin = true;
-    state.isOwner = true;
-    renderAdmin();
-    return;
-  }
+  const shifts = await getAll("shifts");
+  const wk = weekKeyFromDate(new Date());
 
-  const employees = await getAll("employees");
-  const user = employees.find(e => e.pin === pin && e.active !== false);
+  let totalHours = 0;
+  shifts
+    .filter(s => s.employeeId === emp.id && s.out)
+    .forEach(s=>{
+      if(weekKeyFromDate(new Date(s.in)) === wk){
+        totalHours += hoursBetween(s.in, s.out);
+      }
+    });
 
-  if(user){
-    state.currentUser = user;
-    state.isAdmin = false;
-    state.isOwner = false;
-    renderEmployee();
-  }
+  const otHours = computeOvertime(totalHours);
+  const rate = Number(emp.rate || 0);
+  const otValue = otHours * rate * 0.5;
+
+  openModal(`${escapeHTML(emp.name)}`, `
+    <div class="card soft" style="margin-top:0;">
+      <div class="kpi" style="justify-content:flex-start;">
+        <div class="pill"><strong>Total (wk)</strong>&nbsp;&nbsp;${totalHours.toFixed(2)} hrs</div>
+        <div class="pill"><strong>OT (wk)</strong>&nbsp;&nbsp;${otHours.toFixed(2)} hrs</div>
+        <div class="pill"><strong>OT $</strong>&nbsp;&nbsp;$${otValue.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px;">
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>
+  `);
 }
 
 async function renderEmployee(){
@@ -391,6 +433,7 @@ async function renderEmployee(){
 
   setAppHTML(`
     ${brandHTML(`Welcome ${escapeHTML(me.name)}!`)}
+    ${navBarHTML("clock")}
     <div class="kpi">
       <div class="pill"><strong>Earned this week</strong>&nbsp;&nbsp;$${totals.pay.toFixed(2)}</div>
       <div class="pill"><strong>Rate</strong>&nbsp;&nbsp;$${Number(me.rate||0).toFixed(2)}/hr</div>
@@ -399,7 +442,6 @@ async function renderEmployee(){
     <div class="row">
       <button class="btn primary shimmer" onclick="clockIn()">Clock In</button>
       <button class="btn danger shimmer" onclick="clockOut()">Clock Out</button>
-      <button class="btn" onclick="renderLogin()">Log Out</button>
     </div>
 
     <div class="list" id="shiftList"></div>
@@ -436,8 +478,6 @@ async function renderEmployee(){
   });
 }
 
-/* ---------- Admin tools ---------- */
-
 async function openAddEmployeeModal(){
   pingActivity();
   openModal("Add Employee", `
@@ -451,7 +491,6 @@ async function openAddEmployeeModal(){
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn primary" onclick="addEmployeeFromModal()">Add</button>
     </div>
-    <div class="note">IDs and PINs must be unique.</div>
   `);
 }
 
@@ -743,7 +782,8 @@ async function exportJSON(){
   const shifts = await getAll("shifts");
   const employees = await getAll("employees");
   const settings = await getAll("settings");
-  const data = { employees, shifts, settings };
+  const schedule = await getAll("schedule");
+  const data = { employees, shifts, settings, schedule };
 
   const blob = new Blob([JSON.stringify(data)], { type:"application/json" });
   const a = document.createElement("a");
@@ -768,6 +808,7 @@ function importJSON(e){
     if(Array.isArray(data.employees)) for(const emp of data.employees) await save("employees", emp);
     if(Array.isArray(data.shifts)) for(const shift of data.shifts) await save("shifts", shift);
     if(Array.isArray(data.settings)) for(const s of data.settings) await save("settings", s);
+    if(Array.isArray(data.schedule)) for(const x of data.schedule) await save("schedule", x);
     await loadSettings();
     renderAdmin();
   };
@@ -785,11 +826,12 @@ async function renderAdmin(){
     .sort((a,b)=> String(a.name||"").localeCompare(String(b.name||"")));
 
   const shifts = await getAll("shifts");
+  const wk = weekKeyFromDate(new Date());
 
   setAppHTML(`
     ${brandHTML(state.isOwner ? "Admin (Owner)" : "Admin")}
+    ${navBarHTML("clock")}
     <div class="row">
-      <button class="btn" onclick="renderLogin()">Log Out</button>
       <button class="btn accent" onclick="openSettingsModal()">Settings</button>
       <button class="btn primary" onclick="openAddEmployeeModal()">Add Employee</button>
       <button class="btn" onclick="exportCSV()">Export CSV</button>
@@ -812,8 +854,6 @@ async function renderAdmin(){
     return;
   }
 
-  const wk = weekKeyFromDate(new Date());
-
   for(const e of employees){
     const empShifts = shifts
       .filter(s => s.employeeId === e.id)
@@ -831,6 +871,10 @@ async function renderAdmin(){
 
     const recent = empShifts.slice(0, 8);
 
+    const hoursTap = state.isOwner
+      ? `onclick="event.preventDefault(); event.stopPropagation(); openOvertimeModal('${escapeHTML(e.id)}')"`
+      : ``;
+
     const details = document.createElement("details");
     details.className = "emp";
     details.innerHTML = `
@@ -841,7 +885,9 @@ async function renderAdmin(){
         </div>
         <div class="empTail">
           <div style="text-align:right;">
-            <div><strong>${totalWeek.toFixed(2)}</strong> hrs</div>
+            <div ${hoursTap} style="${state.isOwner ? "cursor:pointer;" : ""}">
+              <strong>${totalWeek.toFixed(2)}</strong> hrs
+            </div>
             <div style="opacity:.7;">All: ${totalAll.toFixed(2)} hrs</div>
           </div>
         </div>
@@ -900,12 +946,256 @@ async function renderAdmin(){
   }
 }
 
-async function requestPersistentStorage(){
-  try{
-    if(navigator.storage && navigator.storage.persist){
-      await navigator.storage.persist();
-    }
-  }catch(e){}
+function weekLabel(weekKey){
+  const d = new Date(weekKey + "T00:00:00");
+  const end = new Date(d); end.setDate(end.getDate()+6);
+  const mm1 = String(d.getMonth()+1).padStart(2,"0");
+  const dd1 = String(d.getDate()).padStart(2,"0");
+  const mm2 = String(end.getMonth()+1).padStart(2,"0");
+  const dd2 = String(end.getDate()).padStart(2,"0");
+  return `${mm1}/${dd1} - ${mm2}/${dd2}`;
+}
+
+function addDaysToWeekKey(weekKey, deltaDays){
+  const d = new Date(weekKey + "T00:00:00");
+  d.setDate(d.getDate() + deltaDays);
+  return weekKeyFromDate(d);
+}
+
+function schedId(weekKey, employeeId, dayIndex){
+  return `${weekKey}|${employeeId}|${dayIndex}`;
+}
+
+async function getScheduleForWeek(weekKey){
+  const all = await getAll("schedule");
+  return all.filter(x => x.weekKey === weekKey);
+}
+
+async function getScheduleCell(weekKey, employeeId, dayIndex){
+  return await get("schedule", schedId(weekKey, employeeId, dayIndex));
+}
+
+async function setScheduleCell(weekKey, employeeId, dayIndex, start, end){
+  const entry = {
+    id: schedId(weekKey, employeeId, dayIndex),
+    weekKey,
+    employeeId,
+    dayIndex,
+    start: start || "",
+    end: end || "",
+    updatedAt: new Date().toISOString()
+  };
+  await save("schedule", entry);
+}
+
+async function clearScheduleCell(weekKey, employeeId, dayIndex){
+  await del("schedule", schedId(weekKey, employeeId, dayIndex));
+}
+
+async function clearScheduleWeek(weekKey){
+  const all = await getScheduleForWeek(weekKey);
+  for(const x of all) await del("schedule", x.id);
+}
+
+async function copyScheduleWeek(fromWeekKey, toWeekKey){
+  await clearScheduleWeek(toWeekKey);
+  const from = await getScheduleForWeek(fromWeekKey);
+  for(const x of from){
+    await setScheduleCell(toWeekKey, x.employeeId, x.dayIndex, x.start, x.end);
+  }
+}
+
+function schedulePrevWeek(){ schedState.weekKey = addDaysToWeekKey(schedState.weekKey, -7); schedState.selected=null; renderScheduleAdmin(); }
+function scheduleNextWeek(){ schedState.weekKey = addDaysToWeekKey(schedState.weekKey,  7); schedState.selected=null; renderScheduleAdmin(); }
+function scheduleThisWeek(){ schedState.weekKey = weekKeyFromDate(new Date()); schedState.selected=null; renderScheduleAdmin(); }
+
+async function scheduleCopyLastWeek(){
+  pingActivity();
+  const from = addDaysToWeekKey(schedState.weekKey, -7);
+  await copyScheduleWeek(from, schedState.weekKey);
+  renderScheduleAdmin();
+}
+
+async function scheduleClearWeek(){
+  pingActivity();
+  await clearScheduleWeek(schedState.weekKey);
+  schedState.selected = null;
+  renderScheduleAdmin();
+}
+
+function scheduleSelectCell(employeeId, dayIndex){
+  schedState.selected = { employeeId, dayIndex };
+  renderScheduleAdmin();
+}
+
+async function scheduleSave(){
+  pingActivity();
+  const sel = schedState.selected;
+  if(!sel) return;
+
+  const start = (qs("#schedStart")?.value || "").trim();
+  const end = (qs("#schedEnd")?.value || "").trim();
+
+  if(!start && !end){
+    await clearScheduleCell(schedState.weekKey, sel.employeeId, sel.dayIndex);
+  } else {
+    await setScheduleCell(schedState.weekKey, sel.employeeId, sel.dayIndex, start, end);
+  }
+
+  renderScheduleAdmin();
+}
+
+async function scheduleClear(){
+  pingActivity();
+  const sel = schedState.selected;
+  if(!sel) return;
+  await clearScheduleCell(schedState.weekKey, sel.employeeId, sel.dayIndex);
+  renderScheduleAdmin();
+}
+
+async function renderScheduleAdmin(){
+  pingActivity();
+  await loadSettings();
+
+  if(!schedState.weekKey) schedState.weekKey = weekKeyFromDate(new Date());
+
+  const employees = (await getAll("employees"))
+    .filter(e => e.active !== false)
+    .sort((a,b)=> String(a.name||"").localeCompare(String(b.name||"")));
+
+  const weekKey = schedState.weekKey;
+  const weekData = await getScheduleForWeek(weekKey);
+
+  let html = `
+    ${brandHTML(state.isOwner ? "Admin (Owner) — Schedule" : "Admin — Schedule")}
+    ${navBarHTML("schedule")}
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <button class="btn slim" onclick="schedulePrevWeek()">◀ Prev</button>
+        <div style="text-align:center;">
+          <div style="font-weight:700;">Week</div>
+          <div style="opacity:.85;">${weekLabel(weekKey)}</div>
+        </div>
+        <button class="btn slim" onclick="scheduleNextWeek()">Next ▶</button>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:10px;">
+        <button class="btn slim" onclick="scheduleThisWeek()">This Week</button>
+        <button class="btn slim" onclick="scheduleCopyLastWeek()">Copy Last Week</button>
+        <button class="btn slim danger" onclick="scheduleClearWeek()">Clear Week</button>
+      </div>
+    </div>
+
+    <div class="card" style="overflow:auto;">
+      <table style="width:100%; border-collapse:collapse; min-width:720px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:10px;border-bottom:1px solid var(--line);">Employee</th>
+            ${DAYS.map(d=>`<th style="text-align:center;padding:10px;border-bottom:1px solid var(--line);">${d}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${employees.map(emp=>{
+            return `
+              <tr>
+                <td style="padding:10px;border-bottom:1px solid var(--line); white-space:nowrap;">
+                  <div style="font-weight:700;">${escapeHTML(emp.name)}</div>
+                  <div style="opacity:.75;font-size:12px;">${escapeHTML(emp.id)}</div>
+                </td>
+                ${DAYS.map((_,dayIndex)=>{
+                  const cell = weekData.find(x => x.employeeId === emp.id && x.dayIndex === dayIndex);
+                  const label = cell && cell.start && cell.end ? `${cell.start}–${cell.end}` : "Off";
+                  const isSel = schedState.selected && schedState.selected.employeeId===emp.id && schedState.selected.dayIndex===dayIndex;
+                  return `
+                    <td
+                      onclick="scheduleSelectCell('${escapeHTML(emp.id)}',${dayIndex})"
+                      style="padding:10px;border-bottom:1px solid var(--line); text-align:center; cursor:pointer; ${isSel ? "outline:2px solid rgba(124,92,255,.6); outline-offset:-2px; border-radius:10px;" : ""}"
+                    >
+                      <span class="badge ${cell && cell.start && cell.end ? "glow" : ""}">${label}</span>
+                    </td>
+                  `;
+                }).join("")}
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" id="schedEditor"></div>
+  `;
+
+  setAppHTML(html);
+
+  const editor = qs("#schedEditor");
+  if(!schedState.selected){
+    editor.innerHTML = `<div class="note">Tap a cell above to set a shift.</div>`;
+    return;
+  }
+
+  const { employeeId, dayIndex } = schedState.selected;
+  const emp = await get("employees", employeeId);
+  const existing = await getScheduleCell(weekKey, employeeId, dayIndex);
+
+  const startVal = existing?.start || "";
+  const endVal = existing?.end || "";
+
+  editor.innerHTML = `
+    <div style="font-weight:700;font-size:16px;">Edit Shift</div>
+    <div class="note" style="margin-top:6px;">${escapeHTML(emp?.name || "Employee")} • ${DAYS[dayIndex]} • Week ${weekLabel(weekKey)}</div>
+    <div class="grid2" style="margin-top:12px;">
+      <div>
+        <div class="note">Start</div>
+        <input class="field" id="schedStart" type="time" value="${startVal}">
+      </div>
+      <div>
+        <div class="note">End</div>
+        <input class="field" id="schedEnd" type="time" value="${endVal}">
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px;">
+      <button class="btn" onclick="scheduleSave()">Save</button>
+      <button class="btn danger" onclick="scheduleClear()">Clear</button>
+    </div>
+  `;
+}
+
+async function renderScheduleEmployee(){
+  pingActivity();
+  await loadSettings();
+
+  const me = state.currentUser;
+  const weekKey = weekKeyFromDate(new Date());
+  const weekData = await getScheduleForWeek(weekKey);
+  const mine = weekData.filter(x => x.employeeId === me.id).sort((a,b)=> a.dayIndex - b.dayIndex);
+
+  setAppHTML(`
+    ${brandHTML(`Welcome ${escapeHTML(me.name)} — Schedule`)}
+    ${navBarHTML("schedule")}
+    <div class="card">
+      <div style="font-weight:700;">This Week</div>
+      <div class="note">${weekLabel(weekKey)}</div>
+    </div>
+    <div class="list" id="schedList"></div>
+  `);
+
+  const list = qs("#schedList");
+
+  for(let i=0;i<7;i++){
+    const entry = mine.find(x => x.dayIndex === i);
+    const label = entry && entry.start && entry.end ? `${entry.start} – ${entry.end}` : "Off";
+
+    const row = document.createElement("div");
+    row.className = "shiftRow";
+    row.innerHTML = `
+      <div class="left">
+        <div><strong>${DAYS[i]}</strong></div>
+        <div class="badge ${entry && entry.start && entry.end ? "glow" : ""}">${label}</div>
+      </div>
+      <div class="right"></div>
+    `;
+    list.appendChild(row);
+  }
 }
 
 initDB().then(async ()=>{
