@@ -1,12 +1,12 @@
 const ADMIN_PIN = "9999";
 const OWNER_PIN = "1421";
-const WEBHOOK_URL = "PUT_DISCORD_WEBHOOK_URL_HERE";
+const WEBHOOK_URL = "https://discord.com/api/webhooks/1476784807634534532/sZfyQIF-YZQnyWOqgI3Wmkca6Rv9mCr2FxbqCvwq-DM0w4JQVv0YE0qULW7f7ImTM-Td";
 
 let state = {
   currentUser: null,
   isAdmin: false,
   isOwner: false,
-  storeName: "Shop Clock",
+  storeName: "Coma Smoke Shop",
   logo: ""
 };
 
@@ -303,6 +303,15 @@ async function getCurrentWeekTotalsForEmployee(employee){
   return { totalHours, pay };
 }
 
+function escapeHTML(str){
+  return String(str || "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
 async function renderEmployee(){
   pingActivity();
   await autoCloseAt1130();
@@ -361,15 +370,6 @@ async function renderEmployee(){
     `;
     list.appendChild(row);
   });
-}
-
-function escapeHTML(str){
-  return String(str || "")
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
 }
 
 async function openAddEmployeeModal(){
@@ -563,7 +563,8 @@ async function editShift(shiftId){
   const shift = await get("shifts", shiftId);
   if(!shift) return;
 
-  const before = { ...shift };
+  const beforeIn = shift.in;
+  const beforeOut = shift.out;
 
   openModal("Edit Shift", `
     <div class="grid2">
@@ -572,14 +573,12 @@ async function editShift(shiftId){
     </div>
     <div class="row" style="justify-content:flex-end;margin-top:12px;">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn accent" onclick="saveShiftEdit('${escapeHTML(shiftId)}')">Save</button>
+      <button class="btn accent" onclick="saveShiftEdit('${escapeHTML(shiftId)}','${escapeHTML(beforeIn||"")}','${escapeHTML(beforeOut||"")}')">Save</button>
     </div>
   `);
-
-  shift.__before = before;
 }
 
-async function saveShiftEdit(shiftId){
+async function saveShiftEdit(shiftId, beforeIn, beforeOut){
   pingActivity();
   const shift = await get("shifts", shiftId);
   if(!shift) return;
@@ -590,9 +589,6 @@ async function saveShiftEdit(shiftId){
 
   if(!newIn) return;
   const outISO = newOut ? newOut.toISOString() : null;
-
-  const beforeIn = shift.in;
-  const beforeOut = shift.out;
 
   shift.in = newIn.toISOString();
   shift.out = outISO;
@@ -718,6 +714,58 @@ function importJSON(e){
   e.target.value = "";
 }
 
+async function requestPersistentStorage(){
+  try{
+    if(navigator.storage && navigator.storage.persist){
+      await navigator.storage.persist();
+    }
+  }catch(e){}
+}
+
+function computeOvertime(totalHours){
+  const otHours = Math.max(0, totalHours - 40);
+  return otHours;
+}
+
+async function openOvertimeModal(employeeId){
+  if(!state.isOwner) return;
+
+  const emp = await get("employees", employeeId);
+  if(!emp) return;
+
+  const shifts = await getAll("shifts");
+  const wk = weekKeyFromDate(new Date());
+
+  let totalHours = 0;
+  shifts
+    .filter(s => s.employeeId === emp.id && s.out)
+    .forEach(s=>{
+      if(weekKeyFromDate(new Date(s.in)) === wk){
+        totalHours += hoursBetween(s.in, s.out);
+      }
+    });
+
+  const otHours = computeOvertime(totalHours);
+  const rate = Number(emp.rate || 0);
+  const otValue = otHours * rate * 0.5;
+
+  openModal(`${escapeHTML(emp.name)}`, `
+    <div class="card soft" style="margin-top:0;">
+      <div class="kpi" style="justify-content:flex-start;">
+        <div class="pill"><strong>Total (wk)</strong>&nbsp;&nbsp;${totalHours.toFixed(2)} hrs</div>
+        <div class="pill"><strong>OT (wk)</strong>&nbsp;&nbsp;${otHours.toFixed(2)} hrs</div>
+        <div class="pill"><strong>OT $</strong>&nbsp;&nbsp;$${otValue.toFixed(2)}</div>
+      </div>
+      <div class="note" style="margin-top:10px;">
+        Week starts Monday. OT is hours over 40 for the current week only.
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px;">
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>
+  `);
+}
+
 async function renderAdmin(){
   pingActivity();
   await autoCloseAt1130();
@@ -729,7 +777,7 @@ async function renderAdmin(){
 
   const shifts = await getAll("shifts");
 
-  let html = `
+  setAppHTML(`
     ${brandHTML(state.isOwner ? "Admin (Owner)" : "Admin")}
     <div class="row">
       <button class="btn" onclick="renderLogin()">Log Out</button>
@@ -742,11 +790,8 @@ async function renderAdmin(){
     </div>
 
     <div class="hr"></div>
-
     <div class="list" id="empList"></div>
-  `;
-
-  setAppHTML(html);
+  `);
 
   const list = qs("#empList");
 
@@ -758,20 +803,32 @@ async function renderAdmin(){
     return;
   }
 
-  employees.forEach((e)=>{
+  const wk = weekKeyFromDate(new Date());
+
+  for(const e of employees){
     const empShifts = shifts
       .filter(s => s.employeeId === e.id)
       .sort((a,b)=> new Date(b.in).getTime() - new Date(a.in).getTime());
 
-    let total = 0;
+    let totalAll = 0;
+    empShifts.forEach((s)=>{ if(s.out) totalAll += hoursBetween(s.in, s.out); });
+
+    let totalWeek = 0;
     empShifts.forEach((s)=>{
-      if(s.out) total += hoursBetween(s.in, s.out);
+      if(s.out && weekKeyFromDate(new Date(s.in)) === wk){
+        totalWeek += hoursBetween(s.in, s.out);
+      }
     });
 
     const recent = empShifts.slice(0, 8);
 
     const details = document.createElement("details");
     details.className = "emp";
+
+    const hoursTap = state.isOwner
+      ? `onclick="event.preventDefault(); event.stopPropagation(); openOvertimeModal('${escapeHTML(e.id)}')"`
+      : ``;
+
     details.innerHTML = `
       <summary>
         <div class="empHead">
@@ -779,9 +836,15 @@ async function renderAdmin(){
           <div class="empMeta">ID: ${escapeHTML(e.id)} • Rate: $${Number(e.rate||0).toFixed(2)}/hr</div>
         </div>
         <div class="empTail">
-          <div><strong>${total.toFixed(2)}</strong> hrs</div>
+          <div style="text-align:right;">
+            <div ${hoursTap} style="${state.isOwner ? "cursor:pointer;" : ""}">
+              <strong>${totalWeek.toFixed(2)}</strong> hrs
+            </div>
+            <div style="opacity:.7;">All: ${totalAll.toFixed(2)} hrs</div>
+          </div>
         </div>
       </summary>
+
       <div class="empBody">
         <div class="row" style="justify-content:flex-start;">
           <button class="btn slim" onclick="setEmployeeRate('${escapeHTML(e.id)}')">Set Rate</button>
@@ -790,6 +853,7 @@ async function renderAdmin(){
             ? `<button class="btn slim primary" onclick="reactivateEmployee('${escapeHTML(e.id)}')">Reactivate</button>`
             : `<button class="btn slim danger" onclick="deactivateEmployee('${escapeHTML(e.id)}')">Deactivate</button>`}
         </div>
+
         <div class="hr"></div>
         <div class="note">Recent shifts</div>
         <div class="list" id="recent_${escapeHTML(e.id)}"></div>
@@ -805,10 +869,10 @@ async function renderAdmin(){
       empty.className = "card soft";
       empty.innerHTML = `<div class="note">No shifts logged.</div>`;
       recentList.appendChild(empty);
-      return;
+      continue;
     }
 
-    recent.forEach((s)=>{
+    for(const s of recent){
       const inT = s.in ? formatTime(new Date(s.in)) : "--";
       const outT = s.out ? formatTime(new Date(s.out)) : "--";
       const dur = s.out ? hoursBetween(s.in, s.out) : 0;
@@ -830,16 +894,8 @@ async function renderAdmin(){
         </div>
       `;
       recentList.appendChild(row);
-    });
-  });
-}
-
-async function requestPersistentStorage(){
-  try{
-    if(navigator.storage && navigator.storage.persist){
-      await navigator.storage.persist();
     }
-  }catch(e){}
+  }
 }
 
 initDB().then(async ()=>{
