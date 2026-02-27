@@ -391,7 +391,16 @@ function navBarHTML(active){
     </div>
   `;
 
-  if(!state.isAdmin) return coreRow;
+  if(!state.isAdmin){
+    const empRow = `
+      <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+        <button class="btn ${active==="clock"?"accent":""}" onclick="goHome()">Clock</button>
+        ${hasPremium("schedule") ? `<button class="btn ${active==="schedule"?"accent":""}" onclick="openSchedule()">Schedule</button>` : ""}
+        <button class="btn" onclick="logout()">Log Out</button>
+      </div>
+    `;
+    return empRow;
+  }
 
   // Row 2: business tools (premium tools appear here only when unlocked)
   const businessRow = `
@@ -488,11 +497,26 @@ function defaultDayEntry(){
   return { employeeId: "", hours: 8, slot: "AM" };
 }
 
+function normalizeDayAssignments(dayVal){
+  // Backwards compatible: object -> [object], null -> []
+  if(Array.isArray(dayVal)) return dayVal;
+  if(dayVal && typeof dayVal === "object") return [dayVal];
+  return [];
+}
+
+
 async function loadSchedule(weekKey){
   const rec = await get("schedule", weekKey);
-  if(rec && rec.days) return rec;
+  if(rec && rec.days){
+    // normalize each day to array
+    for(let i=0;i<7;i++){
+      rec.days[i] = normalizeDayAssignments(rec.days[i]);
+      if(rec.days[i].length===0) rec.days[i] = [defaultDayEntry()];
+    }
+    return rec;
+  }
   const days = {};
-  for(let i=0;i<7;i++) days[i] = defaultDayEntry();
+  for(let i=0;i<7;i++) days[i] = [defaultDayEntry()];
   return { id: weekKey, weekKey, days, createdAt: Date.now(), updatedAt: Date.now() };
 }
 
@@ -518,6 +542,29 @@ function calcAutoTime(hours, slot){
   return { startH: start, startM: 0, endH: end, endM: 0 };
 }
 
+
+async function addScheduleRow(dayIndex){
+  pingActivity();
+  const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
+  const sched = await loadSchedule(wk);
+  sched.days[dayIndex] = normalizeDayAssignments(sched.days[dayIndex]);
+  sched.days[dayIndex].push(defaultDayEntry());
+  await saveSchedule(sched);
+  renderScheduleAdminBuilder();
+}
+
+async function removeScheduleRow(dayIndex, rowIndex){
+  pingActivity();
+  const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
+  const sched = await loadSchedule(wk);
+  const arr = normalizeDayAssignments(sched.days[dayIndex]);
+  arr.splice(rowIndex, 1);
+  if(arr.length===0) arr.push(defaultDayEntry());
+  sched.days[dayIndex] = arr;
+  await saveSchedule(sched);
+  renderScheduleAdminBuilder();
+}
+
 async function renderScheduleAdminBuilder(){
   pingActivity();
   state.currentView = "schedule";
@@ -527,42 +574,55 @@ async function renderScheduleAdminBuilder(){
 
   const sched = await loadSchedule(wk);
 
-  const dayRows = Array.from({length:7}, (_,i)=>{
-    const entry = sched.days[i] || defaultDayEntry();
-    const hours = Number(entry.hours||0);
-    const slot = entry.slot || "AM";
-    const t = calcAutoTime(hours, slot);
-    const timeLabel = `${formatTime12FromHourMin(t.startH,t.startM)} - ${formatTime12FromHourMin(t.endH,t.endM)}`;
-    const opts = ['<option value="">—</option>'].concat(
-      employees.map(e=>`<option value="${escapeHTML(e.id)}" ${String(e.id)===String(entry.employeeId)?"selected":""}>${escapeHTML(e.name)} (#${escapeHTML(e.id)})</option>`)
-    ).join("");
+  const dayCards = Array.from({length:7}, (_,i)=>{
+    const assigns = normalizeDayAssignments(sched.days[i]);
+    const rows = assigns.map((entry,j)=>{
+      const hours = Number(entry.hours||0);
+      const slot = entry.slot || "AM";
+      const t = calcAutoTime(hours, slot);
+      const timeLabel = `${formatTime12FromHourMin(t.startH,t.startM)} - ${formatTime12FromHourMin(t.endH,t.endM)}`;
+      const opts = ['<option value="">—</option>'].concat(
+        employees.map(e=>`<option value="${escapeHTML(e.id)}" ${String(e.id)===String(entry.employeeId)?"selected":""}>${escapeHTML(e.name)} (#${escapeHTML(e.id)})</option>`)
+      ).join("");
+      return `
+        <div class="card soft" style="margin-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div style="font-weight:800;">Employee Slot ${j+1}</div>
+            <div class="note">${timeLabel}</div>
+          </div>
+          <div style="margin-top:10px; display:grid; grid-template-columns: 1fr 120px 120px 44px; gap:10px; align-items:center;">
+            <select class="input" id="sch_emp_${i}_${j}">${opts}</select>
+            <input class="input" id="sch_hours_${i}_${j}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="8">
+            <select class="input" id="sch_slot_${i}_${j}">
+              <option value="AM" ${slot==="AM"?"selected":""}>AM</option>
+              <option value="PM" ${slot==="PM"?"selected":""}>PM</option>
+            </select>
+            <button class="btn slim danger" onclick="removeScheduleRow(${i},${j})" title="Remove">✕</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
     return `
-      <div class="card soft" style="margin-top:10px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+      <div class="card soft" style="margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
           <div style="font-weight:900;font-size:18px;">${dayLabel(i)} <span class="note" style="font-weight:700;">${isoDayFromWeekKey(wk,i)}</span></div>
-          <div class="note" style="text-align:right;">${timeLabel}</div>
+          <button class="btn" onclick="addScheduleRow(${i})">+ Add Employee</button>
         </div>
-        <div style="margin-top:10px; display:grid; grid-template-columns: 1fr 120px 120px; gap:10px; align-items:center;">
-          <select class="input" id="sch_emp_${i}">${opts}</select>
-          <input class="input" id="sch_hours_${i}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="8">
-          <select class="input" id="sch_slot_${i}">
-            <option value="AM" ${slot==="AM"?"selected":""}>AM</option>
-            <option value="PM" ${slot==="PM"?"selected":""}>PM</option>
-          </select>
-        </div>
+        ${rows}
       </div>
     `;
   }).join("");
 
   setAppHTML(`
     <div class="wrap">
-      ${brandHTML('')}
+      ${brandHTML("")}
       ${navBarHTML("schedule")}
       <div class="card soft" style="margin-top:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
           <div>
             <div style="font-weight:900;font-size:18px;">Schedule Builder</div>
-            <div class="note">Week starts Monday. Select employee + hours + AM/PM. Times auto-generate using 10AM–11PM.</div>
+            <div class="note">Week starts Monday. Add employees per day, set hours + AM/PM. Times auto-generate using 10AM–11PM.</div>
           </div>
           <div class="row">
             <button class="btn" onclick="changeScheduleWeek(-7)">Prev Week</button>
@@ -579,7 +639,7 @@ async function renderScheduleAdminBuilder(){
         </div>
       </div>
 
-      ${dayRows}
+      ${dayCards}
       <div style="height:18px;"></div>
     </div>
   `);
@@ -597,7 +657,7 @@ async function clearScheduleWeek(){
   pingActivity();
   const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
   const days = {};
-  for(let i=0;i<7;i++) days[i] = defaultDayEntry();
+  for(let i=0;i<7;i++) days[i] = [defaultDayEntry()];
   await saveSchedule({ id:wk, weekKey:wk, days, createdAt: Date.now(), updatedAt: Date.now() });
   renderScheduleAdminBuilder();
 }
@@ -606,12 +666,22 @@ async function saveScheduleWeek(){
   pingActivity();
   const wk = state.scheduleWeekKey || weekKeyFromDate(new Date());
   const sched = await loadSchedule(wk);
+
   for(let i=0;i<7;i++){
-    const emp = qs("#sch_emp_"+i)?.value || "";
-    const hours = Number(qs("#sch_hours_"+i)?.value || 0);
-    const slot = qs("#sch_slot_"+i)?.value || "AM";
-    sched.days[i] = { employeeId: emp, hours: Math.max(0, Math.min(13, hours||0)), slot };
+    const empEls = Array.from(document.querySelectorAll(`[id^="sch_emp_${i}_"]`));
+    // if none, keep at least one default row
+    const rows = [];
+    for(const el of empEls){
+      const idParts = el.id.split("_");
+      const j = Number(idParts[idParts.length-1]);
+      const emp = el.value || "";
+      const hours = Number(qs(`#sch_hours_${i}_${j}`)?.value || 0);
+      const slot = qs(`#sch_slot_${i}_${j}`)?.value || "AM";
+      rows.push({ employeeId: emp, hours: Math.max(0, Math.min(13, hours||0)), slot });
+    }
+    sched.days[i] = rows.length ? rows : [defaultDayEntry()];
   }
+
   await saveSchedule(sched);
   openModal("Saved", `<div class="note">Schedule saved for week ${escapeHTML(wk)}.</div>
     <div class="row" style="margin-top:12px;justify-content:flex-end;">
@@ -624,27 +694,31 @@ async function renderScheduleEmployee(){
   state.currentView = "schedule";
   const wk = weekKeyFromDate(new Date());
   const sched = await loadSchedule(wk);
+
   const emp = state.currentUser;
   const empId = emp && (emp.id ?? emp.employeeId);
   const rows = Array.from({length:7}, (_,i)=>{
-    const entry = sched.days[i] || defaultDayEntry();
-    if(String(entry.employeeId) !== String(empId)) return "";
-    const t = calcAutoTime(entry.hours, entry.slot);
-    const timeLabel = `${formatTime12FromHourMin(t.startH,t.startM)} - ${formatTime12FromHourMin(t.endH,t.endM)}`;
+    const assigns = normalizeDayAssignments(sched.days[i]);
+    const mine = assigns.filter(a => String(a.employeeId) === String(empId));
+    if(!mine.length) return "";
+    const inner = mine.map((a)=>{
+      const t = calcAutoTime(a.hours, a.slot);
+      const timeLabel = `${formatTime12FromHourMin(t.startH,t.startM)} - ${formatTime12FromHourMin(t.endH,t.endM)}`;
+      return `<div class="note" style="margin-top:6px;">${escapeHTML(a.slot)} • ${escapeHTML(a.hours)} hour(s) • ${escapeHTML(timeLabel)}</div>`;
+    }).join("");
     return `
       <div class="card soft" style="margin-top:10px;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <div style="font-weight:900;font-size:18px;">${dayLabel(i)} <span class="note" style="font-weight:700;">${isoDayFromWeekKey(wk,i)}</span></div>
-          <div class="note">${escapeHTML(timeLabel)}</div>
         </div>
-        <div class="note" style="margin-top:6px;">${escapeHTML(entry.slot)} • ${escapeHTML(entry.hours)} hour(s)</div>
+        ${inner}
       </div>
     `;
   }).join("");
 
   setAppHTML(`
     <div class="wrap">
-      ${brandHTML('')}
+      ${brandHTML("")}
       ${navBarHTML("schedule")}
       <div class="card soft" style="margin-top:12px;">
         <div style="font-weight:900;font-size:18px;">Your Schedule</div>
@@ -658,19 +732,12 @@ async function renderScheduleEmployee(){
 
 function openSchedule(){
   pingActivity();
-  if(!hasPremium("schedule")){
-    renderPremiumLocked("Scheduling");
-    return;
-  }
   try{
-    if(state.isAdmin){
-      renderScheduleAdminBuilder();
-    }else{
-      renderScheduleEmployee();
-    }
+    if(state.isAdmin) return renderScheduleAdminBuilder();
+    return renderScheduleEmployee();
   }catch(e){
-    openModal("Schedule Error", `<div class="note">Schedule failed to open. This is usually a missing dependency. Reload and try again.</div>
-      <div class="row" style="margin-top:12px; justify-content:flex-end;">
+    openModal("Schedule Error", `<div class="note">Schedule failed to open.</div>
+      <div class="row" style="margin-top:12px;justify-content:flex-end;">
         <button class="btn accent" onclick="closeModal()">OK</button>
       </div>`);
   }
