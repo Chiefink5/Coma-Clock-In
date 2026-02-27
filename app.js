@@ -556,7 +556,7 @@ async function renderScheduleAdminBuilder(){
 
   setAppHTML(`
     <div class="wrap">
-      ${brandHeaderHTML()}
+      ${brandHTML('')}
       ${navBarHTML("schedule")}
       <div class="card soft" style="margin-top:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -644,7 +644,7 @@ async function renderScheduleEmployee(){
 
   setAppHTML(`
     <div class="wrap">
-      ${brandHeaderHTML()}
+      ${brandHTML('')}
       ${navBarHTML("schedule")}
       <div class="card soft" style="margin-top:12px;">
         <div style="font-weight:900;font-size:18px;">Your Schedule</div>
@@ -662,10 +662,17 @@ function openSchedule(){
     renderPremiumLocked("Scheduling");
     return;
   }
-  if(state.isAdmin){
-    renderScheduleAdminBuilder();
-  }else{
-    renderScheduleEmployee();
+  try{
+    if(state.isAdmin){
+      renderScheduleAdminBuilder();
+    }else{
+      renderScheduleEmployee();
+    }
+  }catch(e){
+    openModal("Schedule Error", `<div class="note">Schedule failed to open. This is usually a missing dependency. Reload and try again.</div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end;">
+        <button class="btn accent" onclick="closeModal()">OK</button>
+      </div>`);
   }
 }
 
