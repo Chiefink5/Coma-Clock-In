@@ -427,3 +427,5 @@ details.emp > summary::-webkit-details-marker{ display:none; }
 .premium-locked:hover{filter: brightness(1.08);}
 
 .badge.gold{border-color: rgba(255,215,0,.55) !important; box-shadow: 0 0 18px rgba(255,215,0,.30) !important;}
+
+.pinError{color:#ff6b6b !important; text-shadow:0 0 14px rgba(255,107,107,.45);}

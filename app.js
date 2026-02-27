@@ -541,6 +541,18 @@ async function requestPersistentStorage(){
 
 /* ---------- Clock features ---------- */
 
+
+function flashPinError(){
+  const d = qs("#pinDisplay");
+  if(!d) return;
+  d.textContent = "Invalid PIN";
+  d.classList.add("pinError");
+  setTimeout(()=>{ 
+    d.classList.remove("pinError");
+    d.textContent = "";
+  }, 900);
+}
+
 function renderLogin(){
   clearLogoutTimer();
   setAppHTML(`
@@ -565,7 +577,7 @@ function renderLogin(){
     b.onclick = async ()=>{
       pingActivity();
       if(k==="C"){ pin=""; }
-      else if(k==="OK"){ await handleLogin(pin); pin=""; }
+      else if(k==="OK"){ try{ const ok = await handleLogin(pin); if(!ok){ flashPinError(); } }catch(e){ flashPinError(); } pin=""; }
       else { pin += String(k); }
       display.textContent = pin ? "•".repeat(pin.length) : "";
     };
@@ -575,14 +587,20 @@ function renderLogin(){
 }
 
 async function handleLogin(pin){
-  await loadSettings();
+  pin = String(pin || "").trim();
+
+  try{
+    await loadSettings();
+  }catch(e){
+    // If storage is blocked, still allow admin/owner login
+  }
 
   if(pin === ADMIN_PIN){
     state.currentUser = "admin";
     state.isAdmin = true;
     state.isOwner = false;
     renderAdmin();
-    return;
+    return true;
   }
 
   if(pin === OWNER_PIN){
@@ -590,18 +608,24 @@ async function handleLogin(pin){
     state.isAdmin = true;
     state.isOwner = true;
     renderAdmin();
-    return;
+    return true;
   }
 
-  const employees = await getAll("employees");
-  const user = employees.find(e => e.pin === pin && e.active !== false);
-
-  if(user){
-    state.currentUser = user;
-    state.isAdmin = false;
-    state.isOwner = false;
-    renderEmployee();
+  try{
+    const employees = await getAll("employees");
+    const user = employees.find(e => e.pin === pin && e.active !== false);
+    if(user){
+      state.currentUser = user;
+      state.isAdmin = false;
+      state.isOwner = false;
+      renderEmployee();
+      return true;
+    }
+  }catch(e){
+    // fallthrough
   }
+
+  return false;
 }
 
 async function findOpenShift(employeeId){
