@@ -1,7 +1,7 @@
-const ADMIN_PIN = "9999";
+const ADMIN_PIN = "7482";
 const OWNER_PIN = "1421";
-const WEBHOOK_URL = "PUT_DISCORD_WEBHOOK_URL_HERE";
-const DEV_UNLOCK_CODE = "4517";
+const WEBHOOK_URL = "https://discord.com/api/webhooks/1476784807634534532/sZfyQIF-YZQnyWOqgI3Wmkca6Rv9mCr2FxbqCvwq-DM0w4JQVv0YE0qULW7f7ImTM-Td";
+const DEV_UNLOCK_CODE = "2521";
 
 let state = {
   currentUser: null,
