@@ -1,3 +1,11 @@
+
+
+async function getEmployeeById(empId){
+  const idNum = Number(empId);
+  const employees = await getAll("employees");
+  return employees.find(e => Number(e.id) === idNum) || null;
+}
+
 const ADMIN_PIN = "7482";
 const OWNER_PIN = "1421";
 const WEBHOOK_URL = "https://discord.com/api/webhooks/1476784807634534532/sZfyQIF-YZQnyWOqgI3Wmkca6Rv9mCr2FxbqCvwq-DM0w4JQVv0YE0qULW7f7ImTM-Td";
@@ -293,7 +301,7 @@ async function createEmployeeFromModal(){
 
 async function setEmployeeRate(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){ 
     openModal("Not found", `<div class="note">Employee not found.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
     return;
@@ -313,7 +321,7 @@ async function setEmployeeRate(empId){
 
 async function confirmSetEmployeeRate(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){ closeModal(); return renderAdmin(); }
   const v = (qs("#rate_new")?.value || "").trim();
   const rate = Number(v);
@@ -329,7 +337,7 @@ async function confirmSetEmployeeRate(empId){
 
 async function resetEmployeePin(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){
     openModal("Not found", `<div class="note">Employee not found.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
     return;
@@ -350,7 +358,7 @@ async function resetEmployeePin(empId){
 
 async function confirmResetEmployeePin(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){ closeModal(); return renderAdmin(); }
   const pin = (qs("#pin_new")?.value || "").trim();
   if(!pin || pin.length < 3){
@@ -374,7 +382,7 @@ async function confirmResetEmployeePin(empId){
 
 async function deactivateEmployee(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){ return; }
   openModal("Deactivate Employee", `
     <div class="note">Deactivate <b>${escapeHTML(e.name)}</b> (#${escapeHTML(e.id)})?</div>
@@ -388,7 +396,7 @@ async function deactivateEmployee(empId){
 
 async function confirmDeactivateEmployee(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){ closeModal(); return renderAdmin(); }
   e.active = false;
   await save("employees", e);
@@ -398,7 +406,7 @@ async function confirmDeactivateEmployee(empId){
 
 async function reactivateEmployee(empId){
   pingActivity();
-  const e = await get("employees", String(empId));
+  const e = await getEmployeeById(empId);
   if(!e){ return; }
   e.active = true;
   await save("employees", e);
@@ -612,6 +620,123 @@ function getTrialUntil(){
   if(!t) return null;
   const n = Number(t);
   return Number.isFinite(n) ? n : null;
+}
+
+function getAppLock(){
+  return !!state.appLocked;
+}
+
+async function setAppLock(v, reason){
+  state.appLocked = !!v;
+  state.lockReason = reason || "";
+  await save("settings", { key:"appLocked", value: state.appLocked });
+  await save("settings", { key:"lockReason", value: state.lockReason });
+  try{
+    localStorage.setItem("shopclock_lock_broadcast", JSON.stringify({ t: Date.now(), locked: state.appLocked, reason: state.lockReason }));
+  }catch(e){}
+  try{
+    if(window.BroadcastChannel){
+      const bc = new BroadcastChannel("shopclock_lock");
+      bc.postMessage({ locked: state.appLocked, reason: state.lockReason });
+      bc.close();
+    }
+  }catch(e){}
+}
+
+function shouldAllowLoginPin(pin){
+  // When locked: only OWNER_PIN and DEV entry remain usable
+  if(!getAppLock()) return true;
+  return pin === OWNER_PIN;
+}
+
+function renderLocked(){
+  setAppHTML(`
+    <div class="wrap">
+      ${brandHTML("")}
+      <div class="card soft" style="margin-top:14px;">
+        <div style="font-weight:900;font-size:20px;">Locked</div>
+        <div class="note" style="margin-top:8px;">This system is temporarily locked.</div>
+      </div>
+    </div>
+  `);
+}
+
+async function checkTrialAndTamper(){
+  // Load persisted lock on startup
+  // Trial expiry => lock
+  if(trialActive()) return;
+
+  // If trial exists and expired => lock
+  const until = getTrialUntil();
+  if(until && Date.now() > until){
+    if(!getAppLock()){
+      await setAppLock(true, "trial_expired");
+      // hard reload to kill stale tabs/views
+      try{ setTimeout(()=>location.reload(), 250); }catch(e){}
+    }
+  }
+}
+
+async function recordTimeGuard(){
+  // Detect time rollback attempts (local-only best-effort)
+  const now = Date.now();
+  const last = Number(state.lastSeenNow || 0);
+  if(last && now + 300000 < last){ // 5 min backward
+    await setAppLock(true, "time_tamper");
+    try{ setTimeout(()=>location.reload(), 250); }catch(e){}
+    return;
+  }
+  state.lastSeenNow = now;
+  await save("settings", { key:"lastSeenNow", value: now });
+}
+
+function startLockWatchers(){
+  // multi-tab listeners
+  try{
+    window.addEventListener("storage", (e)=>{
+      if(e.key === "shopclock_lock_broadcast" && e.newValue){
+        try{
+          const msg = JSON.parse(e.newValue);
+          if(typeof msg.locked === "boolean"){
+            state.appLocked = msg.locked;
+            state.lockReason = msg.reason || "";
+            if(state.appLocked) renderLocked();
+          }
+        }catch(_){}
+      }
+    });
+  }catch(e){}
+
+  try{
+    if(window.BroadcastChannel){
+      const bc = new BroadcastChannel("shopclock_lock");
+      bc.onmessage = (ev)=>{
+        const msg = ev.data || {};
+        if(typeof msg.locked === "boolean"){
+          state.appLocked = msg.locked;
+          state.lockReason = msg.reason || "";
+          if(state.appLocked) renderLocked();
+        }
+      };
+      state._lockBC = bc;
+    }
+  }catch(e){}
+
+  // periodic check
+  setInterval(async ()=>{
+    try{
+      await recordTimeGuard();
+      await checkTrialAndTamper();
+      if(getAppLock()){
+        // if user is logged in, kick them out
+        state.currentUser = null;
+        state.isAdmin = false;
+        state.isOwner = false;
+        closeModal();
+        renderLocked();
+      }
+    }catch(e){}
+  }, 3000);
 }
 
 function trialActive(){
@@ -1025,6 +1150,7 @@ async function openDevPanel(){
   <div class="row" style="margin-top:12px; flex-wrap:wrap;">
     <button class="btn" onclick="devSetTrialFromDuration()">Set From Duration</button>
     <button class="btn danger" onclick="devClearTrial()">Clear Trial</button>
+        <button class="btn" onclick="devRestoreBase()">Restore Base Version</button>
   </div>
 
   <div style="margin-top:12px;">
@@ -1072,6 +1198,16 @@ function devSetTrialFromDateTime(){
   const ts = new Date(v).getTime();
   if(!Number.isFinite(ts) || ts <= Date.now()) return;
   setTrialUntil(ts);
+  openDevPanel();
+}
+
+async function devRestoreBase(){
+  pingActivity();
+  // Clear trial and premium, unlock app
+  await setTrialUntil(null);
+  state.premiumFlags = { schedule:false, dashboard:false, payroll:false, weeklyExport:false, audit:false };
+  await saveSetting("premiumFlags", state.premiumFlags);
+  await setAppLock(false, "");
   openDevPanel();
 }
 
@@ -1232,6 +1368,11 @@ function renderLogin(){
 async function handleLogin(pin){
   pin = String(pin || "").trim();
 
+  if(!shouldAllowLoginPin(pin)){
+    return false;
+  }
+
+
   try{
     await loadSettings();
   }catch(e){
@@ -1242,6 +1383,8 @@ async function handleLogin(pin){
     state.currentUser = "admin";
     state.isAdmin = true;
     state.isOwner = false;
+    if(getAppLock()){ renderLocked(); return true; }
+    if(getAppLock()){ renderLocked(); return true; }
     renderAdmin();
     return true;
   }
@@ -1261,6 +1404,7 @@ async function handleLogin(pin){
       state.currentUser = user;
       state.isAdmin = false;
       state.isOwner = false;
+      if(getAppLock()){ renderLocked(); return true; }
       renderEmployee();
       return true;
     }
@@ -1489,7 +1633,7 @@ async function editShift(shiftId){
   const s = await get("shifts", shiftId);
   if(!s) return;
 
-  const emp = await get("employees", String(s.employeeId));
+  const emp = await getEmployeeById(s.employeeId);
   const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
 
   openModal("Edit Shift", `
@@ -1532,7 +1676,7 @@ async function saveShiftEdit(shiftId){
 
   await save("shifts", s);
 
-  const emp = await get("employees", String(s.employeeId));
+  const emp = await getEmployeeById(s.employeeId);
   const name = emp ? emp.name : `Employee`;
   const id = emp ? emp.id : s.employeeId;
   const date = fmtDateMMDDYY(newIn);
@@ -1581,7 +1725,7 @@ async function deleteShift(shiftId){
   const s = await get("shifts", shiftId);
   if(!s) return;
 
-  const emp = await get("employees", String(s.employeeId));
+  const emp = await getEmployeeById(s.employeeId);
   const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
 
   openModal("Delete Shift", `
@@ -1601,7 +1745,7 @@ async function confirmDeleteShift(shiftId){
 
   await del("shifts", shiftId);
 
-  const emp = await get("employees", String(s.employeeId));
+  const emp = await getEmployeeById(s.employeeId);
   const name = emp ? emp.name : `Employee`;
   const id = emp ? emp.id : s.employeeId;
   const date = fmtDateMMDDYY(s.in);

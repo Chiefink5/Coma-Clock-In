@@ -438,3 +438,9 @@ details.emp > summary::-webkit-details-marker{ display:none; }
 
 select.input{appearance:none;}
 
+
+/* modal-responsive */
+.modal{width:min(620px,94vw);}
+.modalBody{overflow-x:hidden;}
+.input{max-width:100%;box-sizing:border-box;}
+.row{flex-wrap:wrap;}
