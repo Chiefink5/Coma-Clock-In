@@ -444,3 +444,13 @@ select.input{appearance:none;}
 .modalBody{overflow-x:hidden;}
 .input{max-width:100%;box-sizing:border-box;}
 .row{flex-wrap:wrap;}
+
+/* modal-scroll-fix v22 */
+.modalOverlay{align-items:flex-start; padding:calc(18px + env(safe-area-inset-top,0px)) 14px 18px;}
+.modal{max-height:calc(100dvh - 36px);}
+.modalBody{max-height:calc(100dvh - 160px); overflow-y:auto; -webkit-overflow-scrolling:touch;}
+.modalFooter, .modalHeader{position:sticky; background:rgba(0,0,0,.35); backdrop-filter: blur(10px);}
+.modalHeader{top:0; padding-top:10px;}
+.modalFooter{bottom:0; padding-bottom:10px;}
+.modal .row{flex-wrap:wrap;}
+.modal .btn{flex:0 0 auto;}

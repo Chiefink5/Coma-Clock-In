@@ -415,6 +415,21 @@ async function reactivateEmployee(empId){
 
 
 
+function handleDelegatedClicks(e){
+  const btn = e.target && (e.target.closest ? e.target.closest("button[data-action]") : null);
+  if(!btn) return;
+  const action = btn.getAttribute("data-action");
+  const shiftId = btn.getAttribute("data-shift");
+  if(action === "editShift" && shiftId){
+    e.preventDefault(); e.stopPropagation();
+    return editShift(shiftId);
+  }
+  if(action === "deleteShift" && shiftId){
+    e.preventDefault(); e.stopPropagation();
+    return deleteShift(shiftId);
+  }
+}
+
 function pingActivity(){
   bumpAutoLogout();
 }
@@ -644,9 +659,9 @@ async function setAppLock(v, reason){
 }
 
 function shouldAllowLoginPin(pin){
-  // When locked: only OWNER_PIN and DEV entry remain usable
   if(!getAppLock()) return true;
-  return pin === OWNER_PIN;
+  // Locked: only owner and dev pins are accepted
+  return (pin === OWNER_PIN) || (pin === DEV_UNLOCK_CODE);
 }
 
 function renderLocked(){
@@ -654,8 +669,16 @@ function renderLocked(){
     <div class="wrap">
       ${brandHTML("")}
       <div class="card soft" style="margin-top:14px;">
-        <div style="font-weight:900;font-size:20px;">Locked</div>
-        <div class="note" style="margin-top:8px;">This system is temporarily locked.</div>
+        <div style="font-weight:900;font-size:20px;">System Locked</div>
+        <div class="note" style="margin-top:8px;">
+          Your trial has ended or access has been disabled.
+        </div>
+        <div class="note" style="margin-top:6px;">
+          Contact the developer to reactivate.
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px; justify-content:center;">
+        <button class="btn" onclick="logout()">Back</button>
       </div>
     </div>
   `);
@@ -671,6 +694,8 @@ async function checkTrialAndTamper(){
   if(until && Date.now() > until){
     if(!getAppLock()){
       await setAppLock(true, "trial_expired");
+      try{ logout(); }catch(e){}
+      try{ renderLocked(); }catch(e){}
       // hard reload to kill stale tabs/views
       try{ setTimeout(()=>location.reload(), 250); }catch(e){}
     }
@@ -1370,6 +1395,15 @@ async function handleLogin(pin){
 
   if(!shouldAllowLoginPin(pin)){
     return false;
+  }
+
+  // Locked dev entry
+  if(getAppLock() && pin === DEV_UNLOCK_CODE){
+    state.currentUser = "dev";
+    state.isAdmin = true;
+    state.isOwner = true;
+    openDevPanel();
+    return true;
   }
 
 
@@ -2198,3 +2232,7 @@ initDB().then(async ()=>{
   setInterval(autoCloseAt1130, 30000);
   renderLogin();
 });
+
+document.addEventListener("click", handleDelegatedClicks, true);
+
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ try{ checkTrialAndTamper(); }catch(e){} } });
