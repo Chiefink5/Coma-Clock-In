@@ -430,6 +430,24 @@ function handleDelegatedClicks(e){
   }
 }
 
+function handleDelegatedShiftButtons(e){
+  const btn = e.target && (e.target.closest ? e.target.closest("button[data-action][data-shift]") : null);
+  if(!btn) return;
+  const action = btn.getAttribute("data-action");
+  const shiftId = btn.getAttribute("data-shift");
+  if(!action || !shiftId) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try{
+    if(action === "editShift") return editShift(shiftId);
+    if(action === "deleteShift") return deleteShift(shiftId);
+  }catch(err){
+    try{
+      openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
+    }catch(_){}
+  }
+}
+
 function pingActivity(){
   bumpAutoLogout();
 }
@@ -1555,8 +1573,8 @@ async function renderAdmin(){
       const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
       const buttonsHTML = lockedShift ? `<span class="badge gold">Locked</span>` : `
           <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
-            <button class="btn slim" onclick="editShift('${s.shiftId}')">Edit</button>
-            <button class="btn slim danger" onclick="deleteShift('${s.shiftId}')">Delete</button>
+            <button class="btn slim" data-action="editShift" data-shift="${escapeHTML(s.shiftId)}">Edit</button>
+            <button class="btn slim danger" data-action="deleteShift" data-shift="${escapeHTML(s.shiftId)}">Delete</button>
           </div>`;
 
       const row = document.createElement("div");
@@ -1663,155 +1681,171 @@ async function clockOut(){
   renderEmployee();
 
 async function editShift(shiftId){
-  pingActivity();
-  if(!state.isAdmin) return;
-  const s = await get("shifts", shiftId);
-  if(!s) return;
+  try{
+      pingActivity();
+      if(!state.isAdmin) return;
+      const s = await get("shifts", shiftId);
+      if(!s) return;
 
-  const emp = await getEmployeeById(s.employeeId);
-  const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
+      const emp = await getEmployeeById(s.employeeId);
+      const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
 
-  openModal("Edit Shift", `
-    <div class="form">
-      <div class="note">Employee: <b>${escapeHTML(empLabel)}</b></div>
-      <label class="lbl" style="margin-top:12px;">Clock In</label>
-      <input class="input" id="edit_in" type="datetime-local" value="${escapeHTML(toDateTimeLocalValue(s.in))}">
-      <label class="lbl" style="margin-top:12px;">Clock Out</label>
-      <input class="input" id="edit_out" type="datetime-local" value="${escapeHTML(s.out ? toDateTimeLocalValue(s.out) : "")}">
-      <div class="row" style="margin-top:14px; justify-content:flex-end;">
-        <button class="btn" onclick="closeModal()">Cancel</button>
-        <button class="btn accent" onclick="saveShiftEdit('${escapeHTML(s.shiftId)}')">Save</button>
-      </div>
-    </div>
-  `);
+      openModal("Edit Shift", `
+        <div class="form">
+          <div class="note">Employee: <b>${escapeHTML(empLabel)}</b></div>
+          <label class="lbl" style="margin-top:12px;">Clock In</label>
+          <input class="input" id="edit_in" type="datetime-local" value="${escapeHTML(toDateTimeLocalValue(s.in))}">
+          <label class="lbl" style="margin-top:12px;">Clock Out</label>
+          <input class="input" id="edit_out" type="datetime-local" value="${escapeHTML(s.out ? toDateTimeLocalValue(s.out) : "")}">
+          <div class="row" style="margin-top:14px; justify-content:flex-end;">
+            <button class="btn" onclick="closeModal()">Cancel</button>
+            <button class="btn accent" onclick="saveShiftEdit('${escapeHTML(s.shiftId)}')">Save</button>
+          </div>
+        </div>
+      `);
+  }catch(err){
+    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
+  }
 }
 
 async function saveShiftEdit(shiftId){
-  pingActivity();
-  const s = await get("shifts", shiftId);
-  if(!s) return closeModal();
+  try{
+      pingActivity();
+      const s = await get("shifts", shiftId);
+      if(!s) return closeModal();
 
-  const beforeIn = s.in;
-  const beforeOut = s.out;
+      const beforeIn = s.in;
+      const beforeOut = s.out;
 
-  const inV = qs("#edit_in")?.value || "";
-  const outV = qs("#edit_out")?.value || "";
+      const inV = qs("#edit_in")?.value || "";
+      const outV = qs("#edit_out")?.value || "";
 
-  const newIn = fromDateTimeLocalValue(inV);
-  const newOut = outV ? fromDateTimeLocalValue(outV) : null;
+      const newIn = fromDateTimeLocalValue(inV);
+      const newOut = outV ? fromDateTimeLocalValue(outV) : null;
 
-  if(!newIn || (newOut && new Date(newOut).getTime() <= new Date(newIn).getTime())){
-    openModal("Invalid time", `<div class="note">Clock out must be after clock in.</div>
-      <div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
+      if(!newIn || (newOut && new Date(newOut).getTime() <= new Date(newIn).getTime())){
+        openModal("Invalid time", `<div class="note">Clock out must be after clock in.</div>
+          <div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
+        return;
+      }
+
+      s.in = newIn;
+      s.out = newOut;
+
+      await save("shifts", s);
+
+      const emp = await getEmployeeById(s.employeeId);
+      const name = emp ? emp.name : `Employee`;
+      const id = emp ? emp.id : s.employeeId;
+      const date = fmtDateMMDDYY(newIn);
+
+      const beforeHours = beforeOut ? hoursBetween(beforeIn, beforeOut) : 0;
+      const afterHours = newOut ? hoursBetween(newIn, newOut) : 0;
+      const diff = afterHours - beforeHours;
+      const diffStr = (diff >= 0 ? "+" : "") + diff.toFixed(2) + " hour(s)";
+
+      await addAudit({
+        action: "shift_edited",
+        weekKey: weekKeyFromDate(new Date(newIn)),
+        shiftId: s.shiftId,
+        employeeId: s.employeeId,
+        before: { in: beforeIn, out: beforeOut },
+        after: { in: newIn, out: newOut }
+      });
+
+      await sendWebhook({
+        content:
+    `Shift Edited
+    Employee
+    > ${name} ${id}
+    Date
+    ${date}
+    Before
+    > In: ${fmtTime12(beforeIn)}
+    > Out: ${beforeOut ? fmtTime12(beforeOut) : "—"}
+    After
+    > In: ${fmtTime12(newIn)}
+    > Out: ${newOut ? fmtTime12(newOut) : "—"}
+    Hours Difference
+    > ${diffStr}`
+      });
+
+      closeModal();
+      // refresh current view
+      if(state.currentView === "audit") return renderAudit();
+      if(state.currentView === "weeklyExport") return renderWeeklyExport();
+      return renderAdmin();
+  }catch(err){
+    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
   }
-
-  s.in = newIn;
-  s.out = newOut;
-
-  await save("shifts", s);
-
-  const emp = await getEmployeeById(s.employeeId);
-  const name = emp ? emp.name : `Employee`;
-  const id = emp ? emp.id : s.employeeId;
-  const date = fmtDateMMDDYY(newIn);
-
-  const beforeHours = beforeOut ? hoursBetween(beforeIn, beforeOut) : 0;
-  const afterHours = newOut ? hoursBetween(newIn, newOut) : 0;
-  const diff = afterHours - beforeHours;
-  const diffStr = (diff >= 0 ? "+" : "") + diff.toFixed(2) + " hour(s)";
-
-  await addAudit({
-    action: "shift_edited",
-    weekKey: weekKeyFromDate(new Date(newIn)),
-    shiftId: s.shiftId,
-    employeeId: s.employeeId,
-    before: { in: beforeIn, out: beforeOut },
-    after: { in: newIn, out: newOut }
-  });
-
-  await sendWebhook({
-    content:
-`Shift Edited
-Employee
-> ${name} ${id}
-Date
-${date}
-Before
-> In: ${fmtTime12(beforeIn)}
-> Out: ${beforeOut ? fmtTime12(beforeOut) : "—"}
-After
-> In: ${fmtTime12(newIn)}
-> Out: ${newOut ? fmtTime12(newOut) : "—"}
-Hours Difference
-> ${diffStr}`
-  });
-
-  closeModal();
-  // refresh current view
-  if(state.currentView === "audit") return renderAudit();
-  if(state.currentView === "weeklyExport") return renderWeeklyExport();
-  return renderAdmin();
 }
 
 async function deleteShift(shiftId){
-  pingActivity();
-  if(!state.isAdmin) return;
-  const s = await get("shifts", shiftId);
-  if(!s) return;
+  try{
+      pingActivity();
+      if(!state.isAdmin) return;
+      const s = await get("shifts", shiftId);
+      if(!s) return;
 
-  const emp = await getEmployeeById(s.employeeId);
-  const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
+      const emp = await getEmployeeById(s.employeeId);
+      const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
 
-  openModal("Delete Shift", `
-    <div class="note">Delete this shift?</div>
-    <div class="note" style="margin-top:6px;">${escapeHTML(empLabel)} • ${escapeHTML(fmtDateMMDDYY(s.in))}</div>
-    <div class="row" style="margin-top:14px; justify-content:flex-end;">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn danger" onclick="confirmDeleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
-    </div>
-  `);
+      openModal("Delete Shift", `
+        <div class="note">Delete this shift?</div>
+        <div class="note" style="margin-top:6px;">${escapeHTML(empLabel)} • ${escapeHTML(fmtDateMMDDYY(s.in))}</div>
+        <div class="row" style="margin-top:14px; justify-content:flex-end;">
+          <button class="btn" onclick="closeModal()">Cancel</button>
+          <button class="btn danger" onclick="confirmDeleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
+        </div>
+      `);
+  }catch(err){
+    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
+  }
 }
 
 async function confirmDeleteShift(shiftId){
-  pingActivity();
-  const s = await get("shifts", shiftId);
-  if(!s) return closeModal();
+  try{
+      pingActivity();
+      const s = await get("shifts", shiftId);
+      if(!s) return closeModal();
 
-  await del("shifts", shiftId);
+      await del("shifts", shiftId);
 
-  const emp = await getEmployeeById(s.employeeId);
-  const name = emp ? emp.name : `Employee`;
-  const id = emp ? emp.id : s.employeeId;
-  const date = fmtDateMMDDYY(s.in);
-  const hrs = s.out ? hoursBetween(s.in, s.out) : 0;
+      const emp = await getEmployeeById(s.employeeId);
+      const name = emp ? emp.name : `Employee`;
+      const id = emp ? emp.id : s.employeeId;
+      const date = fmtDateMMDDYY(s.in);
+      const hrs = s.out ? hoursBetween(s.in, s.out) : 0;
 
-  await addAudit({
-    action: "shift_deleted",
-    weekKey: weekKeyFromDate(new Date(s.in)),
-    shiftId: s.shiftId,
-    employeeId: s.employeeId,
-    before: { in: s.in, out: s.out }
-  });
+      await addAudit({
+        action: "shift_deleted",
+        weekKey: weekKeyFromDate(new Date(s.in)),
+        shiftId: s.shiftId,
+        employeeId: s.employeeId,
+        before: { in: s.in, out: s.out }
+      });
 
-  await sendWebhook({
-    content:
-`Shift Deleted
-Employee
-> ${name} ${id}
-Date
-${date}
-Before
-> In: ${fmtTime12(s.in)}
-> Out: ${s.out ? fmtTime12(s.out) : "—"}
-Hours Difference
-> -${hrs.toFixed(2)} hour(s)`
-  });
+      await sendWebhook({
+        content:
+    `Shift Deleted
+    Employee
+    > ${name} ${id}
+    Date
+    ${date}
+    Before
+    > In: ${fmtTime12(s.in)}
+    > Out: ${s.out ? fmtTime12(s.out) : "—"}
+    Hours Difference
+    > -${hrs.toFixed(2)} hour(s)`
+      });
 
-  closeModal();
-  if(state.currentView === "audit") return renderAudit();
-  if(state.currentView === "weeklyExport") return renderWeeklyExport();
-  return renderAdmin();
+      closeModal();
+      if(state.currentView === "audit") return renderAudit();
+      if(state.currentView === "weeklyExport") return renderWeeklyExport();
+      return renderAdmin();
+  }catch(err){
+    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
+  }
 }
 
 
@@ -2237,3 +2271,8 @@ initDB().then(async ()=>{
 document.addEventListener("click", handleDelegatedClicks, true);
 
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ try{ checkTrialAndTamper(); }catch(e){} } });
+
+document.addEventListener("click", handleDelegatedShiftButtons, true);
+
+startLockWatchers();
+checkTrialAndTamper();
