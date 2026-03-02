@@ -1,11 +1,3 @@
-
-
-async function getEmployeeById(empId){
-  const idNum = Number(empId);
-  const employees = await getAll("employees");
-  return employees.find(e => Number(e.id) === idNum) || null;
-}
-
 const ADMIN_PIN = "7482";
 const OWNER_PIN = "1421";
 const WEBHOOK_URL = "https://discord.com/api/webhooks/1476784807634534532/sZfyQIF-YZQnyWOqgI3Wmkca6Rv9mCr2FxbqCvwq-DM0w4JQVv0YE0qULW7f7ImTM-Td";
@@ -27,6 +19,13 @@ let state = {
     weeklyExport:false,
     audit:false
   }
+  ,
+  // Trial / lock
+  trialEndsAt: null,      // epoch ms
+  appLocked: false,       // hard lock (trial expired or tamper)
+  lockReason: "",
+  timeGuard: { maxNow: 0 } // anti-clock-back
+
 };
 
 let db;
@@ -215,6 +214,105 @@ function openSettingsModal(){
   `);
 }
 
+
+/* ---------- Trial / hard lock ---------- */
+
+function nowMs(){ return Date.now(); }
+
+async function setLockState(locked, reason){
+  state.appLocked = !!locked;
+  state.lockReason = reason || "";
+  await saveSetting("appLocked", state.appLocked);
+  await saveSetting("lockReason", state.lockReason);
+  try{
+    if(window.BroadcastChannel){
+      const bc = new BroadcastChannel("shopclock_lock");
+      bc.postMessage({ locked: state.appLocked, reason: state.lockReason });
+      bc.close();
+    }
+  }catch(e){}
+}
+
+async function enforceTrialAndTamperLock(){
+  try{ await loadSettings(); }catch(e){}
+  const now = nowMs();
+
+  // anti-clock-back: keep a "max observed time" and lock if time goes backwards a lot
+  try{
+    const tg = state.timeGuard && typeof state.timeGuard === "object" ? state.timeGuard : { maxNow: 0 };
+    const maxNow = typeof tg.maxNow === "number" ? tg.maxNow : 0;
+    if(maxNow && now < (maxNow - 2*60*1000)){
+      await setLockState(true, "Device time changed");
+      await saveSetting("timeGuard", { maxNow });
+      return;
+    }
+    const newMax = Math.max(maxNow || 0, now);
+    state.timeGuard = { maxNow: newMax };
+    await saveSetting("timeGuard", state.timeGuard);
+  }catch(e){}
+
+  // trial expiry hard lock
+  if(state.trialEndsAt && typeof state.trialEndsAt === "number" && now >= state.trialEndsAt){
+    if(!state.appLocked){
+      await setLockState(true, "Trial expired");
+    }
+  }
+}
+
+function startLockWatcher(){
+  // broadcast listener
+  try{
+    if(window.BroadcastChannel){
+      const bc = new BroadcastChannel("shopclock_lock");
+      bc.onmessage = (ev)=>{
+        if(ev && ev.data && typeof ev.data.locked === "boolean"){
+          state.appLocked = ev.data.locked;
+          state.lockReason = ev.data.reason || state.lockReason;
+          if(state.appLocked){
+            forceLogoutToLocked();
+          }
+        }
+      };
+    }
+  }catch(e){}
+
+  // periodic check
+  setInterval(async ()=>{
+    await enforceTrialAndTamperLock();
+    if(state.appLocked && (!state.isAdmin && !state.isOwner)){
+      forceLogoutToLocked();
+    }
+  }, 5000);
+
+  document.addEventListener("visibilitychange", async ()=>{
+    if(!document.hidden){
+      await enforceTrialAndTamperLock();
+      if(state.appLocked && (!state.isAdmin && !state.isOwner)){
+        forceLogoutToLocked();
+      }
+    }
+  });
+}
+
+function forceLogoutToLocked(){
+  state.currentUser = null;
+  state.isAdmin = false;
+  state.isOwner = false;
+  renderLogin();
+}
+
+function lockScreenHTML(){
+  const msg = state.lockReason ? escapeHTML(state.lockReason) : "Access locked";
+  return `
+    ${brandHTML("Contact developer")}
+    <div class="card">
+      <div class="note">This system is locked.</div>
+      <div style="margin-top:10px;line-height:1.4;">${msg}</div>
+      <div style="margin-top:12px;" class="note">Please contact the developer to re-enable access.</div>
+    </div>
+  `;
+}
+
 async function saveSettingsFromModal(){
   try{
     const storeName = qs("#set_storeName")?.value?.trim() || "Shop Clock";
@@ -299,155 +397,6 @@ async function createEmployeeFromModal(){
   renderAdmin();
 }
 
-async function setEmployeeRate(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){ 
-    openModal("Not found", `<div class="note">Employee not found.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  openModal("Set Hourly Rate", `
-    <div class="form">
-      <div class="note">Employee: <b>${escapeHTML(e.name)}</b> (#${escapeHTML(e.id)})</div>
-      <label class="lbl" style="margin-top:12px;">New hourly rate</label>
-      <input class="input" id="rate_new" inputmode="decimal" value="${escapeHTML((e.rate ?? 0).toString())}" placeholder="15.00">
-      <div class="row" style="margin-top:14px; justify-content:flex-end;">
-        <button class="btn" onclick="closeModal()">Cancel</button>
-        <button class="btn accent" onclick="confirmSetEmployeeRate('${escapeHTML(e.id)}')">Save</button>
-      </div>
-    </div>
-  `);
-}
-
-async function confirmSetEmployeeRate(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){ closeModal(); return renderAdmin(); }
-  const v = (qs("#rate_new")?.value || "").trim();
-  const rate = Number(v);
-  if(!Number.isFinite(rate) || rate < 0){
-    openModal("Invalid rate", `<div class="note">Enter a valid number.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  e.rate = rate;
-  await save("employees", e);
-  closeModal();
-  renderAdmin();
-}
-
-async function resetEmployeePin(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){
-    openModal("Not found", `<div class="note">Employee not found.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  openModal("Reset PIN", `
-    <div class="form">
-      <div class="note">Employee: <b>${escapeHTML(e.name)}</b> (#${escapeHTML(e.id)})</div>
-      <label class="lbl" style="margin-top:12px;">New PIN</label>
-      <input class="input" id="pin_new" inputmode="numeric" value="" placeholder="4 digits">
-      <div class="note" style="margin-top:8px;">PIN must be unique.</div>
-      <div class="row" style="margin-top:14px; justify-content:flex-end;">
-        <button class="btn" onclick="closeModal()">Cancel</button>
-        <button class="btn accent" onclick="confirmResetEmployeePin('${escapeHTML(e.id)}')">Save</button>
-      </div>
-    </div>
-  `);
-}
-
-async function confirmResetEmployeePin(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){ closeModal(); return renderAdmin(); }
-  const pin = (qs("#pin_new")?.value || "").trim();
-  if(!pin || pin.length < 3){
-    openModal("Invalid PIN", `<div class="note">Enter a PIN.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  if(pin === ADMIN_PIN || pin === OWNER_PIN || pin === DEV_UNLOCK_CODE){
-    openModal("Not allowed", `<div class="note">That PIN is reserved.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  const employees = await getAll("employees");
-  if(employees.some(x => String(x.pin) === String(pin) && String(x.id) !== String(e.id))){
-    openModal("Duplicate PIN", `<div class="note">That PIN is already assigned to another employee.</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  e.pin = pin;
-  await save("employees", e);
-  closeModal();
-  renderAdmin();
-}
-
-async function deactivateEmployee(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){ return; }
-  openModal("Deactivate Employee", `
-    <div class="note">Deactivate <b>${escapeHTML(e.name)}</b> (#${escapeHTML(e.id)})?</div>
-    <div class="note" style="margin-top:6px;">They will no longer be able to log in with their PIN.</div>
-    <div class="row" style="margin-top:14px; justify-content:flex-end;">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn danger" onclick="confirmDeactivateEmployee('${escapeHTML(e.id)}')">Deactivate</button>
-    </div>
-  `);
-}
-
-async function confirmDeactivateEmployee(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){ closeModal(); return renderAdmin(); }
-  e.active = false;
-  await save("employees", e);
-  closeModal();
-  renderAdmin();
-}
-
-async function reactivateEmployee(empId){
-  pingActivity();
-  const e = await getEmployeeById(empId);
-  if(!e){ return; }
-  e.active = true;
-  await save("employees", e);
-  renderAdmin();
-}
-
-
-
-function handleDelegatedClicks(e){
-  const btn = e.target && (e.target.closest ? e.target.closest("button[data-action]") : null);
-  if(!btn) return;
-  const action = btn.getAttribute("data-action");
-  const shiftId = btn.getAttribute("data-shift");
-  if(action === "editShift" && shiftId){
-    e.preventDefault(); e.stopPropagation();
-    return editShift(shiftId);
-  }
-  if(action === "deleteShift" && shiftId){
-    e.preventDefault(); e.stopPropagation();
-    return deleteShift(shiftId);
-  }
-}
-
-function handleDelegatedShiftButtons(e){
-  const btn = e.target && (e.target.closest ? e.target.closest("button[data-action][data-shift]") : null);
-  if(!btn) return;
-  const action = btn.getAttribute("data-action");
-  const shiftId = btn.getAttribute("data-shift");
-  if(!action || !shiftId) return;
-  e.preventDefault();
-  e.stopPropagation();
-  try{
-    if(action === "editShift") return editShift(shiftId);
-    if(action === "deleteShift") return deleteShift(shiftId);
-  }catch(err){
-    try{
-      openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-    }catch(_){}
-  }
-}
-
 function pingActivity(){
   bumpAutoLogout();
 }
@@ -457,6 +406,10 @@ async function loadSettings(){
   const logo = await get("settings","logo");
   const premium = await get("settings","premiumUnlocked");
   const flags = await get("settings","premiumFlags");
+  const trialEnds = await get("settings","trialEndsAt");
+  const locked = await get("settings","appLocked");
+  const lockReason = await get("settings","lockReason");
+  const tg = await get("settings","timeGuard");
   if(storeName && typeof storeName.value === "string") state.storeName = storeName.value;
   if(logo && typeof logo.value === "string") state.logo = logo.value;
 
@@ -477,6 +430,12 @@ async function loadSettings(){
   }
 
   state.premiumFlags = base;
+
+  if(trialEnds && typeof trialEnds.value === "number") state.trialEndsAt = trialEnds.value;
+  if(locked && typeof locked.value === "boolean") state.appLocked = locked.value;
+  if(lockReason && typeof lockReason.value === "string") state.lockReason = lockReason.value;
+  if(tg && typeof tg.value === "object" && tg.value) state.timeGuard = tg.value;
+
 }
 
 async function saveSetting(key, value){
@@ -522,36 +481,9 @@ function openExportModal(){
   `);
 }
 
-async function exportJSON(){
-  pingActivity();
-  const payload = {
-    exportedAt: new Date().toISOString(),
-    version: "shop-clock",
-    settings: await getAll("settings"),
-    employees: await getAll("employees"),
-    shifts: await getAll("shifts"),
-    schedule: await getAll("schedule"),
-    audit: await getAll("audit")
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:"application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `clock_export_${new Date().toISOString().slice(0,10)}.json`;
-  a.click();
-}
-
-async function exportCSV(){
-  pingActivity();
-  const wk = weekKeyFromDate(new Date());
-  await downloadWeeklySummaryCSV(wk);
-}
-
-
-
 
 function brandHTML(sub){
   return `
-<div class="buildTag">BUILD v23</div>
     <div class="topbar">
       <div class="brand">
         ${state.logo ? `<img src="${state.logo}">` : ``}
@@ -644,178 +576,8 @@ function renderPremiumLocked(featureLabel){
 
 function hasPremium(featureKey){
   if(state.isOwner) return true;
-  if(trialActive()) return true;
   return !!(state.premiumFlags && state.premiumFlags[featureKey] === true);
 }
-
-
-function getTrialUntil(){
-  const t = state.trialUntil;
-  if(!t) return null;
-  const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-}
-
-function getAppLock(){
-  return !!state.appLocked;
-}
-
-async function setAppLock(v, reason){
-  state.appLocked = !!v;
-  state.lockReason = reason || "";
-  await save("settings", { key:"appLocked", value: state.appLocked });
-  await save("settings", { key:"lockReason", value: state.lockReason });
-  try{
-    localStorage.setItem("shopclock_lock_broadcast", JSON.stringify({ t: Date.now(), locked: state.appLocked, reason: state.lockReason }));
-  }catch(e){}
-  try{
-    if(window.BroadcastChannel){
-      const bc = new BroadcastChannel("shopclock_lock");
-      bc.postMessage({ locked: state.appLocked, reason: state.lockReason });
-      bc.close();
-    }
-  }catch(e){}
-}
-
-function shouldAllowLoginPin(pin){
-  if(!getAppLock()) return true;
-  // Locked: only owner and dev pins are accepted
-  return (pin === OWNER_PIN) || (pin === DEV_UNLOCK_CODE);
-}
-
-function renderLocked(){
-  setAppHTML(`
-    <div class="wrap">
-      ${brandHTML("")}
-      <div class="card soft" style="margin-top:14px;">
-        <div style="font-weight:900;font-size:20px;">System Locked</div>
-        <div class="note" style="margin-top:8px;">
-          Your trial has ended or access has been disabled.
-        </div>
-        <div class="note" style="margin-top:6px;">
-          Contact the developer to reactivate.
-        </div>
-      </div>
-      <div class="row" style="margin-top:12px; justify-content:center;">
-        <button class="btn" onclick="logout()">Back</button>
-      </div>
-    </div>
-  `);
-}
-
-async function checkTrialAndTamper(){
-  // Load persisted lock on startup
-  // Trial expiry => lock
-  if(trialActive()) return;
-
-  // If trial exists and expired => lock
-  const until = getTrialUntil();
-  if(until && Date.now() > until){
-    if(!getAppLock()){
-      await setAppLock(true, "trial_expired");
-      try{ logout(); }catch(e){}
-      try{ renderLocked(); }catch(e){}
-      // hard reload to kill stale tabs/views
-      try{ setTimeout(()=>location.reload(), 250); }catch(e){}
-    }
-  }
-}
-
-async function recordTimeGuard(){
-  // Detect time rollback attempts (local-only best-effort)
-  const now = Date.now();
-  const last = Number(state.lastSeenNow || 0);
-  if(last && now + 300000 < last){ // 5 min backward
-    await setAppLock(true, "time_tamper");
-    try{ setTimeout(()=>location.reload(), 250); }catch(e){}
-    return;
-  }
-  state.lastSeenNow = now;
-  await save("settings", { key:"lastSeenNow", value: now });
-}
-
-function startLockWatchers(){
-  // multi-tab listeners
-  try{
-    window.addEventListener("storage", (e)=>{
-      if(e.key === "shopclock_lock_broadcast" && e.newValue){
-        try{
-          const msg = JSON.parse(e.newValue);
-          if(typeof msg.locked === "boolean"){
-            state.appLocked = msg.locked;
-            state.lockReason = msg.reason || "";
-            if(state.appLocked) renderLocked();
-          }
-        }catch(_){}
-      }
-    });
-  }catch(e){}
-
-  try{
-    if(window.BroadcastChannel){
-      const bc = new BroadcastChannel("shopclock_lock");
-      bc.onmessage = (ev)=>{
-        const msg = ev.data || {};
-        if(typeof msg.locked === "boolean"){
-          state.appLocked = msg.locked;
-          state.lockReason = msg.reason || "";
-          if(state.appLocked) renderLocked();
-        }
-      };
-      state._lockBC = bc;
-    }
-  }catch(e){}
-
-  // periodic check
-  setInterval(async ()=>{
-    try{
-      await recordTimeGuard();
-      await checkTrialAndTamper();
-      if(getAppLock()){
-        // if user is logged in, kick them out
-        state.currentUser = null;
-        state.isAdmin = false;
-        state.isOwner = false;
-        closeModal();
-        renderLocked();
-      }
-    }catch(e){}
-  }, 3000);
-}
-
-function trialActive(){
-  const until = getTrialUntil();
-  if(!until) return false;
-  return Date.now() <= until;
-}
-
-function trialRemainingMs(){
-  const until = getTrialUntil();
-  if(!until) return 0;
-  return Math.max(0, until - Date.now());
-}
-
-function fmtDuration(ms){
-  ms = Math.max(0, Number(ms)||0);
-  const totalMin = Math.floor(ms/60000);
-  const days = Math.floor(totalMin/(60*24));
-  const hours = Math.floor((totalMin - days*60*24)/60);
-  const mins = totalMin % 60;
-  const parts = [];
-  if(days) parts.push(days+"d");
-  if(hours || days) parts.push(hours+"h");
-  parts.push(mins+"m");
-  return parts.join(" ");
-}
-
-async function setTrialUntil(ts){
-  const n = ts ? Number(ts) : 0;
-  const val = (Number.isFinite(n) && n>0) ? n : null;
-  state.trialUntil = val;
-  await save("settings", { key:"trialUntil", value: val });
-}
-
-
 
 
 
@@ -949,9 +711,9 @@ async function renderScheduleAdminBuilder(){
     ${opts}
   </select>
 
-  <div style="display:flex; gap:10px; flex-wrap:wrap;">
-    <input class="input" style="flex:1; min-width:140px;" id="sch_hours_${i}_${j}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="Hours">
-    <select class="input" style="flex:1; min-width:140px;" id="sch_slot_${i}_${j}">
+  <div style="display:flex; gap:10px;">
+    <input class="input" style="flex:1;" id="sch_hours_${i}_${j}" inputmode="numeric" value="${escapeHTML(hours)}" placeholder="Hours">
+    <select class="input" style="flex:1;" id="sch_slot_${i}_${j}">
       <option value="AM" ${slot==="AM"?"selected":""}>AM</option>
       <option value="PM" ${slot==="PM"?"selected":""}>PM</option>
     </select>
@@ -1153,6 +915,26 @@ async function openDevPanel(){
   const f = state.premiumFlags || {};
   openModal("Premium Controls", `
     <div class="note">Toggle features and save.</div>
+    <div class="card soft" style="margin-top:12px;">
+      <div style="font-weight:800;">Trial / Lock</div>
+      <div class="note" style="margin-top:6px;">Set a trial end date/time. After expiry, the app hard-locks for everyone except Admin/Owner + Developer panel.</div>
+      <div class="form" style="margin-top:10px;">
+        <label class="lbl">Trial ends (local)</label>
+        <input class="input" id="trialEndsAtInput" type="datetime-local">
+        <div class="row" style="justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;">
+          <button class="btn" onclick="setTrialMinutes(5)">+5 min</button>
+          <button class="btn" onclick="setTrialHours(24)">+24 hr</button>
+          <button class="btn" onclick="setTrialDays(3)">+3 days</button>
+          <button class="btn danger" onclick="clearTrial()">Clear</button>
+        </div>
+        <div class="row" style="justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;">
+          <button class="btn accent" onclick="saveTrialEnds()">Save Trial End</button>
+          <button class="btn" onclick="restoreBaseAccess()">Restore Base Access</button>
+          <button class="btn danger" onclick="hardLockNow()">Lock Now</button>
+        </div>
+      </div>
+    </div>
+
 
     <div style="margin-top:12px; display:flex; flex-direction:column; gap:10px;">
       ${devToggleRow("schedule","Schedule Builder", f.schedule)}
@@ -1163,55 +945,79 @@ async function openDevPanel(){
       ${devToggleRow("audit","Audit Log Viewer", f.audit)}
     </div>
 
-
-<div class="card soft" style="margin-top:12px;">
-  <div style="font-weight:900;">Trial Controls</div>
-  <div class="note" style="margin-top:6px;">
-    Current: ${trialActive() ? `<b>ACTIVE</b> (${escapeHTML(fmtDuration(trialRemainingMs()))} left)` : `<b>OFF</b>`}
-  </div>
-
-  <div style="margin-top:12px; display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px;">
-    <div>
-      <div class="note">Days</div>
-      <select class="input" id="trial_days">
-        ${[0,1,2,3,5,7,14].map(v=>`<option value="${v}">${v}</option>`).join("")}
-      </select>
-    </div>
-    <div>
-      <div class="note">Hours</div>
-      <select class="input" id="trial_hours">
-        ${[0,1,2,3,4,6,8,12,24].map(v=>`<option value="${v}">${v}</option>`).join("")}
-      </select>
-    </div>
-    <div>
-      <div class="note">Minutes</div>
-      <select class="input" id="trial_mins">
-        ${[0,1,5,10,15,30,45].map(v=>`<option value="${v}">${v}</option>`).join("")}
-      </select>
-    </div>
-  </div>
-
-  <div class="row" style="margin-top:12px; flex-wrap:wrap;">
-    <button class="btn" onclick="devSetTrialFromDuration()">Set From Duration</button>
-    <button class="btn danger" onclick="devClearTrial()">Clear Trial</button>
-        <button class="btn" onclick="devRestoreBase()">Restore Base Version</button>
-  </div>
-
-  <div style="margin-top:12px;">
-    <div class="note">Or set exact end date/time</div>
-    <input class="input" id="trial_datetime" type="datetime-local">
-    <div class="row" style="margin-top:10px; justify-content:flex-end;">
-      <button class="btn" onclick="devSetTrialFromDateTime()">Set Exact</button>
-    </div>
-  </div>
-</div>
-
     <div class="row" style="justify-content:flex-end;margin-top:14px;">
       <button class="btn danger" onclick="devDisableAll()">Disable All</button>
       <button class="btn accent" onclick="devSaveFlags()">Save</button>
     </div>
   `);
+  setTimeout(()=>{ try{ const el = qs("#trialEndsAtInput"); if(el){ const ms = state.trialEndsAt || 0; el.value = ms? isoToLocalInput(new Date(ms).toISOString()) : ""; } }catch(e){} }, 50);
+
 }
+
+async function saveTrialEnds(){
+  pingActivity();
+  const v = (qs("#trialEndsAtInput")?.value || "").trim();
+  if(!v) return;
+  const iso = localInputToISO(v);
+  if(!iso) return;
+  const ms = new Date(iso).getTime();
+  state.trialEndsAt = ms;
+  await saveSetting("trialEndsAt", ms);
+  await setLockState(false, "");
+  await enforceTrialAndTamperLock();
+  closeModal();
+  renderAdmin();
+}
+
+function _trialNow(){ return nowMs(); }
+
+async function setTrialMinutes(min){
+  pingActivity();
+  const ms = _trialNow() + (min*60*1000);
+  qs("#trialEndsAtInput").value = isoToLocalInput(new Date(ms).toISOString());
+}
+
+async function setTrialHours(hours){
+  pingActivity();
+  const ms = _trialNow() + (hours*60*60*1000);
+  qs("#trialEndsAtInput").value = isoToLocalInput(new Date(ms).toISOString());
+}
+
+async function setTrialDays(days){
+  pingActivity();
+  const ms = _trialNow() + (days*24*60*60*1000);
+  qs("#trialEndsAtInput").value = isoToLocalInput(new Date(ms).toISOString());
+}
+
+async function clearTrial(){
+  pingActivity();
+  state.trialEndsAt = null;
+  await saveSetting("trialEndsAt", null);
+  await setLockState(false, "");
+  closeModal();
+  renderAdmin();
+}
+
+async function hardLockNow(){
+  pingActivity();
+  await setLockState(true, "Locked by developer");
+  closeModal();
+  renderLogin();
+}
+
+async function restoreBaseAccess(){
+  pingActivity();
+  // disable premium + unlock app
+  state.premiumUnlocked = false;
+  state.premiumFlags = { schedule:false, payroll:false, weekLock:false, dashboard:false, weeklyExport:false, audit:false };
+  await saveSetting("premiumUnlocked", false);
+  await saveSetting("premiumFlags", null);
+  await setLockState(false, "");
+  closeModal();
+  renderAdmin();
+}
+
+
 
 function devToggleRow(key, label, checked){
   return `
@@ -1220,45 +1026,6 @@ function devToggleRow(key, label, checked){
       <input type="checkbox" id="flag_${escapeHTML(key)}" ${checked ? "checked" : ""} style="width:22px;height:22px;">
     </label>
   `;
-}
-
-function devSetTrialFromDuration(){
-  pingActivity();
-  const d = Number(qs("#trial_days")?.value || 0);
-  const h = Number(qs("#trial_hours")?.value || 0);
-  const m = Number(qs("#trial_mins")?.value || 0);
-  const ms = ((d*24 + h)*60 + m) * 60000;
-  if(ms <= 0) return;
-  const until = Date.now() + ms;
-  setTrialUntil(until);
-  // keep modal open but refresh contents
-  openDevPanel();
-}
-
-function devSetTrialFromDateTime(){
-  pingActivity();
-  const v = (qs("#trial_datetime")?.value || "").trim();
-  if(!v) return;
-  const ts = new Date(v).getTime();
-  if(!Number.isFinite(ts) || ts <= Date.now()) return;
-  setTrialUntil(ts);
-  openDevPanel();
-}
-
-async function devRestoreBase(){
-  pingActivity();
-  // Clear trial and premium, unlock app
-  await setTrialUntil(null);
-  state.premiumFlags = { schedule:false, dashboard:false, payroll:false, weeklyExport:false, audit:false };
-  await saveSetting("premiumFlags", state.premiumFlags);
-  await setAppLock(false, "");
-  openDevPanel();
-}
-
-function devClearTrial(){
-  pingActivity();
-  setTrialUntil(null);
-  openDevPanel();
 }
 
 async function devDisableAll(){
@@ -1412,32 +1179,22 @@ function renderLogin(){
 async function handleLogin(pin){
   pin = String(pin || "").trim();
 
-  if(!shouldAllowLoginPin(pin)){
-    return false;
-  }
-
-  // Locked dev entry
-  if(getAppLock() && pin === DEV_UNLOCK_CODE){
-    state.currentUser = "dev";
-    state.isAdmin = true;
-    state.isOwner = true;
-    openDevPanel();
-    return true;
-  }
-
-
   try{
     await loadSettings();
   }catch(e){
     // If storage is blocked, still allow admin/owner login
   }
 
+
+  // If app is hard-locked, only Admin/Owner PINs can enter (to restore via dev panel)
+  if(state.appLocked && pin !== ADMIN_PIN && pin !== OWNER_PIN){
+    setAppHTML(lockScreenHTML());
+    return false;
+  }
   if(pin === ADMIN_PIN){
     state.currentUser = "admin";
     state.isAdmin = true;
     state.isOwner = false;
-    if(getAppLock()){ renderLocked(); return true; }
-    if(getAppLock()){ renderLocked(); return true; }
     renderAdmin();
     return true;
   }
@@ -1457,7 +1214,6 @@ async function handleLogin(pin){
       state.currentUser = user;
       state.isAdmin = false;
       state.isOwner = false;
-      if(getAppLock()){ renderLocked(); return true; }
       renderEmployee();
       return true;
     }
@@ -1470,6 +1226,8 @@ async function handleLogin(pin){
 
 
 async function renderAdmin(){
+  if(state.appLocked && !(state.isAdmin || state.isOwner)) { setAppHTML(lockScreenHTML()); return; }
+
   pingActivity();
   state.currentView = "admin";
   state.currentView = "admin";
@@ -1573,8 +1331,8 @@ async function renderAdmin(){
       const lockedShift = !canEditWeek(weekKeyFromDate(new Date(s.in)));
       const buttonsHTML = lockedShift ? `<span class="badge gold">Locked</span>` : `
           <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
-            <button class="btn slim" data-action="editShift" data-shift="${escapeHTML(s.shiftId)}">Edit</button>
-            <button class="btn slim danger" data-action="deleteShift" data-shift="${escapeHTML(s.shiftId)}">Delete</button>
+            <button class="btn slim" onclick="editShift('${s.shiftId}')">Edit</button>
+            <button class="btn slim danger" onclick="deleteShift('${s.shiftId}')">Delete</button>
           </div>`;
 
       const row = document.createElement("div");
@@ -1601,39 +1359,6 @@ async function findOpenShift(employeeId){
   return shifts.find(s => s.employeeId === employeeId && !s.out) || null;
 }
 
-function fmtTime12(iso){
-  if(!iso) return "";
-  const d = new Date(iso);
-  if(!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleTimeString([], { hour:"numeric", minute:"2-digit" });
-}
-
-function fmtDateMMDDYY(iso){
-  const d = new Date(iso);
-  if(!Number.isFinite(d.getTime())) return "";
-  const mm = String(d.getMonth()+1).padStart(2,"0");
-  const dd = String(d.getDate()).padStart(2,"0");
-  const yy = String(d.getFullYear()).slice(-2);
-  return `${mm}/${dd}/${yy}`;
-}
-
-function toDateTimeLocalValue(iso){
-  const d = new Date(iso);
-  if(!Number.isFinite(d.getTime())) return "";
-  const pad=(n)=>String(n).padStart(2,"0");
-  const y=d.getFullYear();
-  const m=pad(d.getMonth()+1);
-  const da=pad(d.getDate());
-  const h=pad(d.getHours());
-  const mi=pad(d.getMinutes());
-  return `${y}-${m}-${da}T${h}:${mi}`;
-}
-
-function fromDateTimeLocalValue(v){
-  const ts = new Date(v).getTime();
-  return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
-}
-
 function hoursBetween(inISO, outISO){
   const a = new Date(inISO).getTime();
   const b = new Date(outISO).getTime();
@@ -1652,6 +1377,182 @@ async function autoCloseAt1130(){
     await save("shifts", s);
   }
 }
+
+
+async function editShift(shiftId){
+  pingActivity();
+  if(!state.isAdmin && !state.isOwner) return;
+
+  const shift = await get("shifts", shiftId);
+  if(!shift) return;
+
+  const beforeIn = shift.in;
+  const beforeOut = shift.out;
+
+  const inLocal = isoToLocalInput(shift.in);
+  const outLocal = shift.out ? isoToLocalInput(shift.out) : "";
+
+  openModal("Edit Shift", `
+    <div class="form">
+      <label class="lbl">Clock In</label>
+      <input class="input" id="edit_in" type="datetime-local" value="${escapeAttr(inLocal)}">
+      <label class="lbl" style="margin-top:12px;">Clock Out</label>
+      <input class="input" id="edit_out" type="datetime-local" value="${escapeAttr(outLocal)}">
+      <div class="note" style="margin-top:10px;">Leave Clock Out empty to keep shift open.</div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px;gap:10px;">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn accent" onclick="saveEditedShift('${shiftId}')">Save</button>
+      </div>
+    </div>
+  `);
+}
+
+async function saveEditedShift(shiftId){
+  pingActivity();
+  if(!state.isAdmin && !state.isOwner) return;
+
+  const shift = await get("shifts", shiftId);
+  if(!shift) return;
+
+  const emp = await get("employees", shift.employeeId);
+  const employeeName = emp ? emp.name : "";
+
+  const beforeIn = shift.in;
+  const beforeOut = shift.out;
+
+  const newIn = localInputToISO(qs("#edit_in")?.value || "");
+  const newOutRaw = (qs("#edit_out")?.value || "").trim();
+  const newOut = newOutRaw ? localInputToISO(newOutRaw) : null;
+
+  if(!newIn){ closeModal(); return; }
+
+  shift.in = newIn;
+  shift.out = newOut;
+  await save("shifts", shift);
+
+  // compute hour delta for the shift only
+  const beforeH = calcShiftHoursISO(beforeIn, beforeOut);
+  const afterH = calcShiftHoursISO(newIn, newOut);
+  const diff = (afterH - beforeH);
+  const diffStr = (diff>=0?"+":"") + diff.toFixed(2) + " hr";
+
+  const dateStr = fmtDateLocal(newIn);
+  const beforeLine = `Before\n> In: ${fmtTimeLocal12(beforeIn)}\n> Out: ${beforeOut?fmtTimeLocal12(beforeOut):"—"}`;
+  const afterLine  = `After\n> In: ${fmtTimeLocal12(newIn)}\n> Out: ${newOut?fmtTimeLocal12(newOut):"—"}`;
+  const details = `Employee\n> ${employeeName} ${shift.employeeId}\nDate\n${dateStr}\n${beforeLine}\n${afterLine}\nHours Difference\n> ${diffStr}`;
+
+  await addAudit({
+    type:"Shift Edited",
+    actor: state.isOwner ? "Owner" : "Admin",
+    employeeId: shift.employeeId,
+    employeeName,
+    shiftId,
+    weekKey: weekKeyFromISO(newIn),
+    details
+  });
+
+  await sendWebhook({
+    content: `**Shift Edited**\n${details.replace(/\n/g,"\n")}`
+  });
+
+  closeModal();
+  renderAdmin();
+}
+
+async function deleteShift(shiftId){
+  pingActivity();
+  if(!state.isAdmin && !state.isOwner) return;
+
+  const shift = await get("shifts", shiftId);
+  if(!shift) return;
+
+  const emp = await get("employees", shift.employeeId);
+  const employeeName = emp ? emp.name : "";
+
+  openModal("Delete Shift", `
+    <div class="note">This cannot be undone.</div>
+    <div class="card soft" style="margin-top:12px;">
+      <div><strong>In:</strong> ${fmtDateTimeLocal(shift.in)}</div>
+      <div><strong>Out:</strong> ${shift.out?fmtDateTimeLocal(shift.out):"—"}</div>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:14px;gap:10px;">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn danger" onclick="confirmDeleteShift('${shiftId}')">Delete</button>
+    </div>
+  `);
+}
+
+async function confirmDeleteShift(shiftId){
+  pingActivity();
+  if(!state.isAdmin && !state.isOwner) return;
+
+  const shift = await get("shifts", shiftId);
+  if(!shift) return;
+
+  const emp = await get("employees", shift.employeeId);
+  const employeeName = emp ? emp.name : "";
+
+  // delete
+  await del("shifts", shiftId);
+
+  const hours = calcShiftHoursISO(shift.in, shift.out);
+  const details = `Employee\n> ${employeeName} ${shift.employeeId}\nDate\n${fmtDateLocal(shift.in)}\nShift\n> In: ${fmtTimeLocal12(shift.in)}\n> Out: ${shift.out?fmtTimeLocal12(shift.out):"—"}\nHours Removed\n> -${hours.toFixed(2)} hr`;
+
+  await addAudit({
+    type:"Shift Deleted",
+    actor: state.isOwner ? "Owner" : "Admin",
+    employeeId: shift.employeeId,
+    employeeName,
+    shiftId,
+    weekKey: weekKeyFromISO(shift.in),
+    details
+  });
+
+  await sendWebhook({ content: `**Shift Deleted**\n${details}` });
+
+  closeModal();
+  renderAdmin();
+}
+
+function calcShiftHoursISO(inISO, outISO){
+  if(!inISO || !outISO) return 0;
+  const a = new Date(inISO).getTime();
+  const b = new Date(outISO).getTime();
+  if(!isFinite(a) || !isFinite(b) || b<=a) return 0;
+  return (b-a)/3600000;
+}
+
+function isoToLocalInput(iso){
+  try{
+    const d = new Date(iso);
+    if(!isFinite(d.getTime())) return "";
+    const pad = (n)=> String(n).padStart(2,"0");
+    const y = d.getFullYear();
+    const m = pad(d.getMonth()+1);
+    const da = pad(d.getDate());
+    const hh = pad(d.getHours());
+    const mm = pad(d.getMinutes());
+    return `${y}-${m}-${da}T${hh}:${mm}`;
+  }catch(e){ return ""; }
+}
+
+function localInputToISO(v){
+  v = String(v||"").trim();
+  if(!v) return null;
+  // value like 2026-02-27T09:15
+  const d = new Date(v);
+  if(!isFinite(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function escapeAttr(s){
+  return String(s||"").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+window.editShift = editShift;
+window.deleteShift = deleteShift;
+window.saveEditedShift = saveEditedShift;
+window.confirmDeleteShift = confirmDeleteShift;
 
 async function clockIn(){
   pingActivity();
@@ -1679,176 +1580,6 @@ async function clockOut(){
   open.out = new Date().toISOString();
   await save("shifts", open);
   renderEmployee();
-
-async function editShift(shiftId){
-  try{
-      pingActivity();
-      if(!state.isAdmin) return;
-      const s = await get("shifts", shiftId);
-      if(!s) return;
-
-      const emp = await getEmployeeById(s.employeeId);
-      const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
-
-      openModal("Edit Shift", `
-        <div class="form">
-          <div class="note">Employee: <b>${escapeHTML(empLabel)}</b></div>
-          <label class="lbl" style="margin-top:12px;">Clock In</label>
-          <input class="input" id="edit_in" type="datetime-local" value="${escapeHTML(toDateTimeLocalValue(s.in))}">
-          <label class="lbl" style="margin-top:12px;">Clock Out</label>
-          <input class="input" id="edit_out" type="datetime-local" value="${escapeHTML(s.out ? toDateTimeLocalValue(s.out) : "")}">
-          <div class="row" style="margin-top:14px; justify-content:flex-end;">
-            <button class="btn" onclick="closeModal()">Cancel</button>
-            <button class="btn accent" onclick="saveShiftEdit('${escapeHTML(s.shiftId)}')">Save</button>
-          </div>
-        </div>
-      `);
-  }catch(err){
-    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
-  }
-}
-
-async function saveShiftEdit(shiftId){
-  try{
-      pingActivity();
-      const s = await get("shifts", shiftId);
-      if(!s) return closeModal();
-
-      const beforeIn = s.in;
-      const beforeOut = s.out;
-
-      const inV = qs("#edit_in")?.value || "";
-      const outV = qs("#edit_out")?.value || "";
-
-      const newIn = fromDateTimeLocalValue(inV);
-      const newOut = outV ? fromDateTimeLocalValue(outV) : null;
-
-      if(!newIn || (newOut && new Date(newOut).getTime() <= new Date(newIn).getTime())){
-        openModal("Invalid time", `<div class="note">Clock out must be after clock in.</div>
-          <div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`);
-        return;
-      }
-
-      s.in = newIn;
-      s.out = newOut;
-
-      await save("shifts", s);
-
-      const emp = await getEmployeeById(s.employeeId);
-      const name = emp ? emp.name : `Employee`;
-      const id = emp ? emp.id : s.employeeId;
-      const date = fmtDateMMDDYY(newIn);
-
-      const beforeHours = beforeOut ? hoursBetween(beforeIn, beforeOut) : 0;
-      const afterHours = newOut ? hoursBetween(newIn, newOut) : 0;
-      const diff = afterHours - beforeHours;
-      const diffStr = (diff >= 0 ? "+" : "") + diff.toFixed(2) + " hour(s)";
-
-      await addAudit({
-        action: "shift_edited",
-        weekKey: weekKeyFromDate(new Date(newIn)),
-        shiftId: s.shiftId,
-        employeeId: s.employeeId,
-        before: { in: beforeIn, out: beforeOut },
-        after: { in: newIn, out: newOut }
-      });
-
-      await sendWebhook({
-        content:
-    `Shift Edited
-    Employee
-    > ${name} ${id}
-    Date
-    ${date}
-    Before
-    > In: ${fmtTime12(beforeIn)}
-    > Out: ${beforeOut ? fmtTime12(beforeOut) : "—"}
-    After
-    > In: ${fmtTime12(newIn)}
-    > Out: ${newOut ? fmtTime12(newOut) : "—"}
-    Hours Difference
-    > ${diffStr}`
-      });
-
-      closeModal();
-      // refresh current view
-      if(state.currentView === "audit") return renderAudit();
-      if(state.currentView === "weeklyExport") return renderWeeklyExport();
-      return renderAdmin();
-  }catch(err){
-    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
-  }
-}
-
-async function deleteShift(shiftId){
-  try{
-      pingActivity();
-      if(!state.isAdmin) return;
-      const s = await get("shifts", shiftId);
-      if(!s) return;
-
-      const emp = await getEmployeeById(s.employeeId);
-      const empLabel = emp ? `${emp.name} (#${emp.id})` : `Employee #${s.employeeId}`;
-
-      openModal("Delete Shift", `
-        <div class="note">Delete this shift?</div>
-        <div class="note" style="margin-top:6px;">${escapeHTML(empLabel)} • ${escapeHTML(fmtDateMMDDYY(s.in))}</div>
-        <div class="row" style="margin-top:14px; justify-content:flex-end;">
-          <button class="btn" onclick="closeModal()">Cancel</button>
-          <button class="btn danger" onclick="confirmDeleteShift('${escapeHTML(s.shiftId)}')">Delete</button>
-        </div>
-      `);
-  }catch(err){
-    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
-  }
-}
-
-async function confirmDeleteShift(shiftId){
-  try{
-      pingActivity();
-      const s = await get("shifts", shiftId);
-      if(!s) return closeModal();
-
-      await del("shifts", shiftId);
-
-      const emp = await getEmployeeById(s.employeeId);
-      const name = emp ? emp.name : `Employee`;
-      const id = emp ? emp.id : s.employeeId;
-      const date = fmtDateMMDDYY(s.in);
-      const hrs = s.out ? hoursBetween(s.in, s.out) : 0;
-
-      await addAudit({
-        action: "shift_deleted",
-        weekKey: weekKeyFromDate(new Date(s.in)),
-        shiftId: s.shiftId,
-        employeeId: s.employeeId,
-        before: { in: s.in, out: s.out }
-      });
-
-      await sendWebhook({
-        content:
-    `Shift Deleted
-    Employee
-    > ${name} ${id}
-    Date
-    ${date}
-    Before
-    > In: ${fmtTime12(s.in)}
-    > Out: ${s.out ? fmtTime12(s.out) : "—"}
-    Hours Difference
-    > -${hrs.toFixed(2)} hour(s)`
-      });
-
-      closeModal();
-      if(state.currentView === "audit") return renderAudit();
-      if(state.currentView === "weeklyExport") return renderWeeklyExport();
-      return renderAdmin();
-  }catch(err){
-    try{ openModal("Error", `<div class="note">${escapeHTML(String(err))}</div><div class="row" style="margin-top:12px;justify-content:flex-end;"><button class="btn accent" onclick="closeModal()">OK</button></div>`); }catch(_){ }
-  }
-}
-
-
 }
 
 async function getCurrentWeekTotalsForEmployee(employee){
@@ -1909,6 +1640,8 @@ async function openOvertimeModal(employeeId){
 }
 
 async function renderEmployee(){
+  if(state.appLocked && !(state.isAdmin || state.isOwner)) { setAppHTML(lockScreenHTML()); return; }
+
   pingActivity();
   state.currentView = "employee";
   state.currentView = "employee";
@@ -2263,16 +1996,9 @@ async function renderAudit(){
 initDB().then(async ()=>{
   await requestPersistentStorage();
   await loadSettings();
+  await enforceTrialAndTamperLock();
+  startLockWatcher();
   if("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
   setInterval(autoCloseAt1130, 30000);
   renderLogin();
 });
-
-document.addEventListener("click", handleDelegatedClicks, true);
-
-document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ try{ checkTrialAndTamper(); }catch(e){} } });
-
-document.addEventListener("click", handleDelegatedShiftButtons, true);
-
-startLockWatchers();
-checkTrialAndTamper();

@@ -37,9 +37,8 @@ body{
 #app{
   max-width:980px;
   margin:0 auto;
-  padding:calc(70px + env(safe-area-inset-top, 0px)) 14px 18px 14px;
+  padding:14px;
 }
-
 
 .topbar{
   position:sticky;
@@ -380,17 +379,12 @@ details.emp > summary::-webkit-details-marker{ display:none; }
   backdrop-filter: blur(8px);
   z-index:50;
   display:flex;
-  align-items:flex-start;
+  align-items:center;
   justify-content:center;
-  overflow-y:auto;
-  -webkit-overflow-scrolling:touch;
-  padding:calc(16px + env(safe-area-inset-top, 0px)) 14px calc(20px + env(safe-area-inset-bottom, 0px));
+  padding:16px;
 }
 
 .modal{
-  box-sizing:border-box;
-  max-height:calc(100dvh - 36px);
-
   width:min(540px, 100%);
   border-radius:18px;
   background: linear-gradient(180deg, rgba(18,22,34,.96), rgba(15,19,32,.96));
@@ -419,7 +413,7 @@ details.emp > summary::-webkit-details-marker{ display:none; }
   cursor:pointer;
 }
 
-.modalBody{ padding:10px; overflow:auto; max-height:calc(100dvh - 170px); box-sizing:border-box; }
+.modalBody{ padding:6px; }
 
 .note{
   color:var(--muted);
@@ -438,28 +432,35 @@ details.emp > summary::-webkit-details-marker{ display:none; }
 
 .form{width:min(520px,92vw);} .lbl{display:block;opacity:.85;font-weight:700;margin-bottom:6px;} .input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:#fff;outline:none;} .input:focus{border-color:rgba(124,92,255,.7);box-shadow:0 0 0 3px rgba(124,92,255,.18);} 
 
-.wrap{width:100%;}
-
+.wrap{max-width:1100px;margin:0 auto;padding:70px 16px 40px 16px;}
 
 select.input{appearance:none;}
 
+/* Schedule spacing */
+.card.soft{
+  padding: 22px;
+}
 
-/* modal-responsive */
-.modal{width:min(620px,94vw);}
-.modalBody{overflow-x:hidden;}
-.input{max-width:100%;box-sizing:border-box;}
-.row{flex-wrap:wrap;}
+/* Make inner schedule blocks breathe */
+.card.soft .input{
+  font-size: 16px;
+}
 
-/* modal-scroll-fix v22 */
-.modalOverlay{align-items:flex-start; padding:calc(18px + env(safe-area-inset-top,0px)) 14px 18px;}
-.modal{max-height:calc(100dvh - 36px);}
-.modalBody{max-height:calc(100dvh - 160px); overflow-y:auto; -webkit-overflow-scrolling:touch;}
-.modalFooter, .modalHeader{position:sticky; background:rgba(0,0,0,.35); backdrop-filter: blur(10px);}
-.modalHeader{top:0; padding-top:10px;}
-.modalFooter{bottom:0; padding-bottom:10px;}
-.modal .row{flex-wrap:wrap;}
-.modal .btn{flex:0 0 auto;}
+/* Modal scrolling fixes */
+.modal{
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modalBody{
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 18px;
+}
 
-.buildTag{position:fixed;top:10px;right:12px;z-index:9999;font-size:12px;opacity:.6;letter-spacing:.08em;}
-
-.modalBody .row{flex-wrap:wrap;}
+/* Form overflow guard */
+.form .input, .form .field, input.input, input.field{
+  width: 100%;
+  box-sizing: border-box;
+}
