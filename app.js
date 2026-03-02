@@ -533,6 +533,7 @@ async function exportCSV(){
 
 function brandHTML(sub){
   return `
+<div class="buildTag">BUILD v23</div>
     <div class="topbar">
       <div class="brand">
         ${state.logo ? `<img src="${state.logo}">` : ``}
